@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Inphormed — MVP</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <header class="px-6 py-4 bg-white shadow">
+    <div class="max-w-5xl mx-auto flex items-center justify-between">
+      <h1 class="text-2xl font-bold">🧠 Inphormed</h1>
+      <span id="health-badge" class="text-sm px-2 py-1 rounded bg-gray-200">Comprobando...</span>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto p-6 space-y-8">
+    <!-- Verificación (texto o documento) -->
+<section class="bg-white p-6 rounded-2xl shadow">
+  <h2 class="text-xl font-semibold mb-4">Verificación de claims (texto o documento)</h2>
+
+  <!-- Selector de modo -->
+  <div class="flex items-center gap-4 mb-4">
+    <label class="inline-flex items-center gap-2">
+      <input type="radio" name="mode" value="text" class="mode-radio" checked />
+      <span>Pegar texto</span>
+    </label>
+    <label class="inline-flex items-center gap-2">
+      <input type="radio" name="mode" value="file" class="mode-radio" />
+      <span>Subir documento (.pptx / .docx)</span>
+    </label>
+  </div>
+
+  <!-- Form único -->
+  <form id="verify-form" class="space-y-4">
+    <!-- Área de texto (modo texto) -->
+    <div id="text-area-wrapper" class="space-y-3">
+      <label class="block text-sm font-medium">Texto del claim o bloque a verificar</label>
+      <textarea id="claim-input" class="w-full border rounded-xl p-3 outline-none focus:ring-2" rows="5"
+        placeholder="Pega aquí el texto (puede ser similar, no idéntico, a la referencia)."></textarea>
+
+      <button id="submit-text-btn" class="mt-1 px-4 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">
+        Verificar texto
+      </button>
+    </div>
+
+    <!-- Selector de archivo (modo documento) -->
+    <div id="file-area-wrapper" class="space-y-3 hidden">
+      <div class="flex items-center gap-3">
+        <input id="verify-file" type="file" accept=".pptx,.docx" class="border rounded-xl p-2 bg-white" />
+      </div>
+      <button id="submit-file-btn" class="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">
+        Subir y verificar documento
+      </button>
+    </div>
+  </form>
+
+  <!-- Resultado -->
+  <div id="verify-result" class="mt-4 text-sm text-gray-800"></div>
+
+  <!-- Ayuda -->
+  <p class="text-xs text-gray-500 mt-4">
+    Consejo: para resultados más sólidos, usa documentos con DOI/PMID o referencias estilo autor-año. El informe se genera en PDF con colores: Verde (similar), Amarillo (dudoso), Rojo (no coincide).
+  </p>
+    </section>
+
+
+    <!-- Ingesta (placeholder) -->
+    <section class="bg-white p-6 rounded-2xl shadow">
+      <h2 class="text-xl font-semibold mb-4">Ingesta de documento (placeholder)</h2>
+      <div class="flex gap-3">
+        <input id="ingest-path" class="flex-1 border rounded-xl p-3" placeholder="Ruta local o referencia (demo)"/>
+        <button id="ingest-btn" class="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90">
+          Ingestar
+        </button>
+      </div>
+      <div id="ingest-result" class="mt-4 text-sm text-gray-800"></div>
+    </section>
+
+    <p class="text-xs text-gray-500">MVP UI — listo para iterar componentes y conectar con RAG/Qdrant.</p>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
