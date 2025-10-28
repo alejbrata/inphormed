@@ -49,3 +49,15 @@ coverage/
 .pytest_cache/
 nosetests.xml
 coverage.xml
+
+# === Datasets sintéticos (no versionar) ===
+synthetic/
+# Si prefieres ignorar solo esta carpeta concreta:
+# synthetic/hs/
+
+# === Artefactos generados por la app ===
+outputs/
+uploads/
+
+# (Opcional) Por si generas ZIPs del dataset
+*.zip

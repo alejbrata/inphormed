@@ -1,10 +1,14 @@
+# app/config/settings.py
+from pathlib import Path
 import os
-from pydantic import BaseSettings
+from dotenv import load_dotenv
 
-class Settings(BaseSettings):
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    QDRANT_HOST: str = os.getenv("QDRANT_HOST", "localhost")
-    QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", 6333))
-    ENV: str = os.getenv("ENV", "local")
+# Base dir del repo: .../inphormed
+BASE_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(BASE_DIR / ".env")
+
+class Settings:
+    def __init__(self) -> None:
+        self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 settings = Settings()

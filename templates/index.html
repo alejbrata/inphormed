@@ -6,79 +6,127 @@
   <title>Inphormed — MVP</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-gray-50 text-gray-900">
+<body class="bg-gray-50 text-gray-900 h-screen">
+  <!-- Header -->
   <header class="px-6 py-4 bg-white shadow">
-    <div class="max-w-5xl mx-auto flex items-center justify-between">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
       <h1 class="text-2xl font-bold">🧠 Inphormed</h1>
-      <span id="health-badge" class="text-sm px-2 py-1 rounded bg-gray-200">Comprobando...</span>
+
+      <div class="flex-1 flex items-center gap-3 justify-end">
+        <span class="text-sm text-gray-600">Tema: <b>Hidradenitis supurativa</b></span>
+        <span id="health-badge" class="text-sm px-2 py-1 rounded bg-gray-200">Comprobando...</span>
+
+        <!-- Botón para activar arrastre (drag & drop) -->
+        <button id="customize-toggle" class="px-3 py-1 rounded-lg border hover:bg-gray-100 text-sm">
+          Personalizar
+        </button>
+
+        <!-- Mini agente de UI (voz + texto) -->
+        <form id="ui-agent-form" class="hidden md:flex items-center gap-2">
+          <button id="ui-mic-btn" type="button" title="Hablar comando"
+                  class="w-9 h-9 flex items-center justify-center rounded-full border hover:bg-gray-100">🎙️</button>
+          <input id="ui-agent-input" class="border rounded p-2 text-sm min-w-[280px]"
+                 placeholder="Ej: pon validar material primero" />
+          <button class="px-3 py-1 rounded-lg border hover:bg-gray-100 text-sm" type="submit">Aplicar</button>
+        </form>
+      </div>
     </div>
   </header>
 
-  <main class="max-w-5xl mx-auto p-6 space-y-8">
-    <!-- Verificación (texto o documento) -->
-<section class="bg-white p-6 rounded-2xl shadow">
-  <h2 class="text-xl font-semibold mb-4">Verificación de claims (texto o documento)</h2>
+  <!-- Main layout -->
+  <div class="max-w-7xl mx-auto grid grid-cols-12 gap-6 p-6 h-[calc(100vh-80px)]">
+    <!-- Sidebar -->
+    <aside class="col-span-3 bg-white rounded-2xl shadow p-4">
+      <nav class="space-y-2">
+        <button data-view="chat" class="nav-btn w-full text-left px-4 py-2 rounded-xl bg-black text-white">Chat</button>
+        <button data-view="validate" class="nav-btn w-full text-left px-4 py-2 rounded-xl hover:bg-gray-100">Validar Material</button>
+        <button data-view="create" class="nav-btn w-full text-left px-4 py-2 rounded-xl hover:bg-gray-100">Crear Material</button>
+      </nav>
 
-  <!-- Selector de modo -->
-  <div class="flex items-center gap-4 mb-4">
-    <label class="inline-flex items-center gap-2">
-      <input type="radio" name="mode" value="text" class="mode-radio" checked />
-      <span>Pegar texto</span>
-    </label>
-    <label class="inline-flex items-center gap-2">
-      <input type="radio" name="mode" value="file" class="mode-radio" />
-      <span>Subir documento (.pptx / .docx)</span>
-    </label>
+      <hr class="my-4">
+      <p class="text-xs text-gray-500">
+        MVP — chat clínico y verificación. Próximamente: generación de PPT, podcast, clips, etc.
+      </p>
+    </aside>
+
+    <!-- Content (todas las vistas visibles; el menú hace scroll a cada una) -->
+    <main class="col-span-9 space-y-6 overflow-y-auto">
+      <!-- VIEW: Chat -->
+      <section id="view-chat" data-widget-id="chat" class="widget bg-white p-6 rounded-2xl shadow h-full flex flex-col">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-semibold">Asistente clínico (Hidradenitis supurativa)</h2>
+          <div class="drag-handle hidden cursor-move text-xs px-2 py-1 rounded bg-gray-200">Arrastrar</div>
+        </div>
+
+        <div id="chat-messages" class="flex-1 overflow-y-auto space-y-4 p-4 border rounded-xl bg-gray-50"></div>
+
+        <form id="chat-form" class="mt-4 flex gap-3">
+          <textarea id="chat-input" rows="2" class="flex-1 border rounded-xl p-3 outline-none focus:ring-2"
+            placeholder="Pregunta algo sobre HS (Hurley, comorbilidades, opciones terapéuticas, etc.)"></textarea>
+          <button class="px-5 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">Enviar</button>
+        </form>
+      </section>
+
+      <!-- VIEW: Validar Material -->
+      <section id="view-validate" data-widget-id="validate" class="widget bg-white p-6 rounded-2xl shadow">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-semibold">Verificación de claims (texto o documento)</h2>
+          <div class="drag-handle hidden cursor-move text-xs px-2 py-1 rounded bg-gray-200">Arrastrar</div>
+        </div>
+
+        <!-- Selector de modo -->
+        <div class="flex items-center gap-4 mb-4">
+          <label class="inline-flex items-center gap-2">
+            <input type="radio" name="mode" value="text" class="mode-radio" checked />
+            <span>Pegar texto</span>
+          </label>
+          <label class="inline-flex items-center gap-2">
+            <input type="radio" name="mode" value="file" class="mode-radio" />
+            <span>Subir documento (.pptx / .docx)</span>
+          </label>
+        </div>
+
+        <!-- Form único -->
+        <form id="verify-form" class="space-y-4">
+          <!-- Área de texto -->
+          <div id="text-area-wrapper" class="space-y-3">
+            <label class="block text-sm font-medium">Texto del claim o bloque a verificar</label>
+            <textarea id="claim-input" class="w-full border rounded-xl p-3 outline-none focus:ring-2" rows="5"
+              placeholder="Pega aquí el texto (puede ser similar, no idéntico, a la referencia)."></textarea>
+            <button id="submit-text-btn" class="mt-1 px-4 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">
+              Verificar texto
+            </button>
+          </div>
+
+          <!-- Área de archivo -->
+          <div id="file-area-wrapper" class="space-y-3 hidden">
+            <input id="verify-file" type="file" accept=".pptx,.docx" class="border rounded-xl p-2 bg-white" />
+            <button id="submit-file-btn" class="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">
+              Subir y verificar documento
+            </button>
+          </div>
+        </form>
+
+        <div id="verify-result" class="mt-4 text-sm text-gray-800"></div>
+        <p class="text-xs text-gray-500 mt-4">
+          Informe PDF con colores: Verde (similar), Amarillo (dudoso), Rojo (no coincide). También documento anotado y snippets con el fragmento exacto.
+        </p>
+      </section>
+
+      <!-- VIEW: Crear Material -->
+      <section id="view-create" data-widget-id="create" class="widget bg-white p-6 rounded-2xl shadow">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-semibold">Crear Material</h2>
+          <div class="drag-handle hidden cursor-move text-xs px-2 py-1 rounded bg-gray-200">Arrastrar</div>
+        </div>
+
+        <p class="text-sm text-gray-600">Próximamente: generación de PPT a partir de estudios, podcast y vídeos.</p>
+        <div class="mt-4 p-4 rounded-xl border bg-gray-50 text-sm text-gray-700">
+          💡 Idea: “Genera 5 diapositivas sobre HS (Hurley II–III), con 3 citas de guías S2k/ESMO.”
+        </div>
+      </section>
+    </main>
   </div>
-
-  <!-- Form único -->
-  <form id="verify-form" class="space-y-4">
-    <!-- Área de texto (modo texto) -->
-    <div id="text-area-wrapper" class="space-y-3">
-      <label class="block text-sm font-medium">Texto del claim o bloque a verificar</label>
-      <textarea id="claim-input" class="w-full border rounded-xl p-3 outline-none focus:ring-2" rows="5"
-        placeholder="Pega aquí el texto (puede ser similar, no idéntico, a la referencia)."></textarea>
-
-      <button id="submit-text-btn" class="mt-1 px-4 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">
-        Verificar texto
-      </button>
-    </div>
-
-    <!-- Selector de archivo (modo documento) -->
-    <div id="file-area-wrapper" class="space-y-3 hidden">
-      <div class="flex items-center gap-3">
-        <input id="verify-file" type="file" accept=".pptx,.docx" class="border rounded-xl p-2 bg-white" />
-      </div>
-      <button id="submit-file-btn" class="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90" type="submit">
-        Subir y verificar documento
-      </button>
-    </div>
-  </form>
-
-  <!-- Resultado -->
-  <div id="verify-result" class="mt-4 text-sm text-gray-800"></div>
-
-  <!-- Ayuda -->
-  <p class="text-xs text-gray-500 mt-4">
-    Consejo: para resultados más sólidos, usa documentos con DOI/PMID o referencias estilo autor-año. El informe se genera en PDF con colores: Verde (similar), Amarillo (dudoso), Rojo (no coincide).
-  </p>
-    </section>
-
-
-    <!-- Ingesta (placeholder) -->
-    <section class="bg-white p-6 rounded-2xl shadow">
-      <h2 class="text-xl font-semibold mb-4">Ingesta de documento (placeholder)</h2>
-      <div class="flex gap-3">
-        <input id="ingest-path" class="flex-1 border rounded-xl p-3" placeholder="Ruta local o referencia (demo)"/>
-        <button id="ingest-btn" class="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90">
-          Ingestar
-        </button>
-      </div>
-      <div id="ingest-result" class="mt-4 text-sm text-gray-800"></div>
-    </section>
-
-    <p class="text-xs text-gray-500">MVP UI — listo para iterar componentes y conectar con RAG/Qdrant.</p>
-  </main>
 
   <script src="/static/app.js"></script>
 </body>
