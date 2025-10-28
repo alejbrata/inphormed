@@ -1,42 +1,84 @@
+# app/services/llm_service.py
+from __future__ import annotations
 import os
+from typing import List, Dict
+
 from app.config.settings import settings
 
+# SDK v1
 try:
-    import openai
-except Exception:
-    openai = None
+    from openai import OpenAI, AzureOpenAI
+except Exception as _e:
+    OpenAI = None
+    AzureOpenAI = None
+
 
 class LLMService:
-    def __init__(self):
-        self.key = settings.OPENAI_API_KEY
-        if self.key and openai:
-            openai.api_key = self.key
+    """
+    Cliente LLM con:
+    - OpenAI por defecto (OPENAI_API_KEY, OPENAI_MODEL, OPENAI_TEMPERATURE)
+    - Azure OpenAI opcional si existen AZURE_* en entorno
+    Maneja tanto historial con/ sin 'system' (si no hay, inyecta uno con el topic).
+    """
 
-    def ask(self, prompt: str):
-        # Stub anterior (lo puedes mantener o eliminar)
+    def __init__(self) -> None:
+        self.provider = "azure" if os.getenv("AZURE_OPENAI_API_KEY") else "openai"
+
+        if self.provider == "azure":
+            if AzureOpenAI is None:
+                raise RuntimeError("Falta el SDK de OpenAI. Instala: pip install openai")
+            self.client = AzureOpenAI(
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+            )
+            # En Azure, 'model' es el nombre del deployment
+            self.model = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+        else:
+            if OpenAI is None:
+                raise RuntimeError("Falta el SDK de OpenAI. Instala: pip install openai")
+            # settings ya cargó .env
+            api_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+            self.client = OpenAI(api_key=api_key)
+            self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+        self.temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
+
+    def ask(self, prompt: str) -> Dict[str, str]:
+        # método legacy, puedes borrarlo si no lo usas
         return {"prompt": prompt, "response": "Respuesta simulada."}
 
-    def chat(self, topic: str, messages: list[dict]) -> str:
-        system = (
-            f"Eres un asistente experto, prudente y claro en {topic}. "
-            "Responde en español, con tono profesional, y sugiere fuentes clínicas de alto nivel "
-            "(p.ej., PubMed, guías ESMO/NCCN) cuando corresponda. "
-            "Si no estás seguro, dilo y explica cómo verificar."
-        )
-        # Si hay API y clave, intenta llamada real (MVP robusto)
-        if self.key and openai:
-            try:
-                resp = openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "system", "content": system}] + messages,
-                    temperature=0.2,
-                )
-                return resp.choices[0].message.content
-            except Exception:
-                pass
-        # Fallback (sin API key o error)
-        last = messages[-1]["content"] if messages else ""
+    def _system_for_topic(self, topic: str) -> str:
         return (
-            f"[MVP sin modelo] (Tema: {topic}) He recibido: «{last}». "
-            "Cuando configures OPENAI_API_KEY, responderé con una salida clínica real con referencias."
+            f"Eres un asistente experto, prudente y claro en {topic}. "
+            "Responde en español con tono profesional. Incluye referencias de alto nivel "
+            "(p. ej., PubMed, guías ESMO/NCCN) cuando proceda. Si no estás seguro, dilo y "
+            "explica cómo verificar. No sustituyes consejo médico."
         )
+
+    def chat(self, topic: str, messages: List[Dict[str, str]]) -> str:
+        """
+        messages: [{'role':'user'|'assistant'|'system', 'content':'...'}, ...]
+        Si el historial no trae 'system', lo inyectamos con el topic.
+        """
+        try:
+            has_system = any(m.get("role") == "system" for m in messages)
+            final_messages = (
+                messages if has_system
+                else [{"role": "system", "content": self._system_for_topic(topic)}] + messages
+            )
+
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=final_messages,
+                temperature=self.temperature,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            # No ocultes el problema: devuélvelo para verlo en Streamlit
+            last = messages[-1]["content"] if messages else ""
+            return (
+                f"[error LLM] (Tema: {topic}) No se pudo obtener respuesta.\n"
+                f"Detalle: {type(e).__name__}: {e}\n"
+                f"Último mensaje: «{last}»"
+            )
