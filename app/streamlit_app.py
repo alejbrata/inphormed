@@ -5,32 +5,36 @@ from typing import List, Dict, Any
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────
-# Config de conexión (ajusta por ENV si no es localhost:8000)
+# Config (por ENV si no es localhost:8000)
 # ─────────────────────────────────────────────────────────────
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 CHAT_ENDPOINT = os.getenv("CHAT_ENDPOINT", "/api/chat")
-CHAT_URL = BACKEND_URL.rstrip("/") + CHAT_ENDPOINT
+CLAIMS_VALIDATE_TEXT = os.getenv("CLAIMS_VALIDATE_TEXT", "/api/claims/validate-text")
+CLAIMS_VALIDATE_PPT = os.getenv("CLAIMS_VALIDATE_PPT", "/api/claims/validate-ppt")
+
+CHAT_URL = BACKEND_URL + CHAT_ENDPOINT
+VALIDATE_TEXT_URL = BACKEND_URL + CLAIMS_VALIDATE_TEXT
+VALIDATE_PPT_URL = BACKEND_URL + CLAIMS_VALIDATE_PPT
 
 st.set_page_config(page_title="Inphormed", layout="wide")
 
 # ─────────────────────────────────────────────────────────────
-# Helper HTTP (usa requests si está; si no, urllib)
+# Helpers HTTP
 # ─────────────────────────────────────────────────────────────
 def post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        import requests
-        r = requests.post(url, json=payload, timeout=60)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        import urllib.request, urllib.error
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+    import requests
+    r = requests.post(url, json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()
+
+def post_multipart(url: str, files: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    import requests
+    r = requests.post(url, files=files, params=params, timeout=300)
+    r.raise_for_status()
+    return r.json()
 
 # ─────────────────────────────────────────────────────────────
-# Utilidades mínimas para el validador (DOCX/PPTX/TXT)
+# Parsers mínimos (para previsualización local)
 # ─────────────────────────────────────────────────────────────
 def parse_docx(file_bytes: bytes) -> List[str]:
     try:
@@ -54,6 +58,7 @@ def parse_pptx(file_bytes: bytes) -> List[str]:
         lines = []
         for slide in pres.slides:
             for shape in slide.shapes:
+                # Solo previsualización; la validación real la hace el backend
                 if hasattr(shape, "text_frame") and shape.text_frame:
                     txt = (shape.text_frame.text or "").strip()
                     if txt:
@@ -65,9 +70,32 @@ def parse_pptx(file_bytes: bytes) -> List[str]:
 def dedupe_keep_order(items: List[str]) -> List[str]:
     seen, out = set(), []
     for x in items:
+        x = (x or "").strip()
         if x and x not in seen:
-            seen.add(x); out.append(x)
+            seen.add(x)
+            out.append(x)
     return out
+
+def hits_table_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows = []
+    for r in results:
+        status = r.get("status", "red")
+        color = {"green":"🟢","yellow":"🟡","red":"🔴"}.get(status, "⚪")
+        best = f"{r.get('best_score', 0.0):.3f}"
+        first = (r.get("hits") or [{}])[0]
+        cite = first.get("pmid") or first.get("doi") or ""
+        url_hit = first.get("url") or ""
+        snippet = (first.get("text") or "")[:200]
+        rows.append({
+            "Dónde": r.get("where", ""),
+            "Semáforo": f"{color} {status}",
+            "Score": best,
+            "Claim": (r.get("text") or "")[:120] + ("…" if len(r.get("text") or "")>120 else ""),
+            "Cita": cite,
+            "URL": url_hit,
+            "Snippet": snippet + ("…" if len(snippet)==200 else ""),
+        })
+    return rows
 
 # ─────────────────────────────────────────────────────────────
 # VISTAS
@@ -75,23 +103,19 @@ def dedupe_keep_order(items: List[str]) -> List[str]:
 def vista_chatbot_hs():
     st.header("Chatbot – Hidradenitis supurativa")
 
-    # historial en sesión (solo 'user' y 'assistant'; el 'system' lo pone el backend)
     if "chat_hs" not in st.session_state:
         st.session_state.chat_hs = [
             {"role": "assistant", "content": "Hola, ¿en qué te ayudo?"}
         ]
 
-    # Render del histórico
     for m in st.session_state.chat_hs:
         st.chat_message(m["role"]).markdown(m["content"])
 
-    # Input del usuario
     user_msg = st.chat_input("Pregunta o describe tu caso…")
     if user_msg:
         st.session_state.chat_hs.append({"role": "user", "content": user_msg})
         st.chat_message("user").markdown(user_msg)
 
-        # Construye el payload para TU backend (SIN 'system')
         messages_for_api: List[Dict[str, str]] = [
             {"role": m["role"], "content": m["content"]}
             for m in st.session_state.chat_hs
@@ -101,10 +125,7 @@ def vista_chatbot_hs():
 
         try:
             with st.spinner("Pensando…"):
-                # ***** AQUÍ se hace el POST al backend *****
                 resp = post_json(CHAT_URL, payload)
-
-            # Tu ruta devuelve {"reply": "..."}
             reply = (resp or {}).get("reply", "").strip() or "No recibí contenido del modelo."
             st.session_state.chat_hs.append({"role": "assistant", "content": reply})
             st.chat_message("assistant").markdown(reply)
@@ -114,59 +135,90 @@ def vista_chatbot_hs():
             st.session_state.chat_hs.append({"role": "assistant", "content": err})
 
 def vista_validador_claims():
-    st.header("Validador de claims (UI mínima)")
-    st.caption("De momento: lectura de claims. Siguiente paso: llamada al validador con IA/RAG.")
+    st.header("Validador de claims")
 
-    tabs = st.tabs(["Pegar texto", "Subir archivo (DOCX / PPTX / TXT)"])
+    with st.sidebar:
+        st.subheader("Parámetros de validación")
+        topk = st.number_input("Top-K", min_value=1, max_value=20, value=int(os.getenv("RAG_TOPK", "5")))
+        thr_green = st.slider("Umbral verde", 0.0, 1.0, float(os.getenv("RAG_THR_GREEN", "0.82")), 0.01)
+        thr_yellow = st.slider("Umbral amarillo", 0.0, 1.0, float(os.getenv("RAG_THR_YELLOW", "0.70")), 0.01)
+        st.caption("Rojo si score < amarillo; Amarillo si entre amarillo y verde; Verde si ≥ verde.")
 
+    tabs = st.tabs(["Pegar texto", "Subir PPTX"])
+
+    # ——— Pegar texto -> /api/claims/validate-text (uno a uno) ———
     with tabs[0]:
-        st.subheader("Pegar claims (uno por línea)")
+        st.subheader("Claims (uno por línea)")
         txt = st.text_area(
-            "Claims",
-            height=200,
+            "Pega claims",
+            height=180,
             placeholder="Mejora la supervivencia global…\nReducción del 30% frente a SOC…",
         )
-        if st.button("Previsualizar claims (texto)"):
+        if st.button("Validar (texto pegado)"):
             claims = dedupe_keep_order([line.strip() for line in txt.splitlines() if line.strip()])
             if not claims:
                 st.warning("Escribe al menos un claim.")
             else:
-                st.success(f"{len(claims)} claims detectados (texto).")
-                st.dataframe({"claim": claims}, use_container_width=True)
+                results: List[Dict[str, Any]] = []
+                with st.spinner("Validando claims…"):
+                    for c in claims:
+                        payload = {
+                            "text": c,
+                            "topk": int(topk),
+                            "thr_green": float(thr_green),
+                            "thr_yellow": float(thr_yellow),
+                        }
+                        try:
+                            res = post_json(VALIDATE_TEXT_URL, payload)
+                            results.append(res)
+                        except Exception as e:
+                            results.append({
+                                "where": "text",
+                                "text": c,
+                                "claim_id": "",
+                                "status": "red",
+                                "best_score": 0.0,
+                                "hits": [],
+                                "_error": str(e),
+                            })
+                rows = hits_table_rows(results)
+                if rows:
+                    import pandas as pd
+                    df = pd.DataFrame(rows, columns=["Dónde","Semáforo","Score","Claim","Cita","URL","Snippet"])
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Sin resultados.")
 
+    # ——— Subir PPTX -> /api/claims/validate-ppt (multipart) ———
     with tabs[1]:
-        st.subheader("Subir archivo")
-        f = st.file_uploader("DOCX / PPTX / TXT", type=["docx","pptx","txt"])
-        if st.button("Previsualizar claims (archivo)", disabled=not f):
+        st.subheader("Sube un PPTX con claims")
+        f = st.file_uploader("PPTX", type=["pptx"])
+        if st.button("Validar (PPTX)", disabled=not f):
             if not f:
-                st.warning("Selecciona un archivo.")
+                st.warning("Selecciona un PPTX.")
             else:
-                ext = (f.name.split(".")[-1] or "").lower()
-                data = f.read()
-                if ext == "docx":
-                    claims = parse_docx(data)
-                elif ext == "pptx":
-                    claims = parse_pptx(data)
-                elif ext == "txt":
-                    claims = [line.strip() for line in data.decode("utf-8", errors="ignore").splitlines() if line.strip()]
-                else:
-                    claims = []
-
-                claims = [c for c in claims if c and not c.startswith("[ERROR")]
-                claims = dedupe_keep_order(claims)
-
-                if not claims:
-                    st.error("No se encontraron claims en el archivo.")
-                else:
-                    st.success(f"{len(claims)} claims detectados (archivo).")
-                    st.dataframe({"claim": claims}, use_container_width=True)
+                params = {"topk": int(topk), "thr_green": float(thr_green), "thr_yellow": float(thr_yellow)}
+                files = {"file": (f.name, f.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation")}
+                try:
+                    with st.spinner("Validando claims del PPTX…"):
+                        data = post_multipart(VALIDATE_PPT_URL, files=files, params=params)
+                    st.success(f"Archivo: {data['file_name']} — Claims detectados: {data['total_claims']}")
+                    rows = hits_table_rows(data.get("results", []))
+                    if rows:
+                        import pandas as pd
+                        df = pd.DataFrame(rows, columns=["Dónde","Semáforo","Score","Claim","Cita","URL","Snippet"])
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Sin resultados.")
+                except Exception as e:
+                    st.error(f"Error validando PPTX: {e}")
 
 def vista_generador_material():
     st.header("Generador de material")
-    st.info("Placeholder limpio. Aquí añadiremos plantillas y salida (PDF/PowerPoint) cuando toque.")
+    st.info("Placeholder. Añadiremos plantillas y salida (PDF/PPT) más adelante.")
 
 # ─────────────────────────────────────────────────────────────
-# Router (tus 3 entradas)
+# Router
 # ─────────────────────────────────────────────────────────────
 PAGES = {
     "Chatbot HS": vista_chatbot_hs,
@@ -179,3 +231,5 @@ with st.sidebar:
     pagina = st.radio("Menú", list(PAGES.keys()))
 
 PAGES[pagina]()
+
+st.caption(f"Backend: {BACKEND_URL}")

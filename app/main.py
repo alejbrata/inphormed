@@ -1,39 +1,34 @@
-import os
-from fastapi import FastAPI, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+# app/main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from app.agents.ingestion_agent import IngestionAgent
-from app.agents.validation_agent import ValidationAgent
-from app.agents.generation_agent import GenerationAgent
-from app.routes.ui_routes import router as ui_router
-# NUEVO: importa routers
-from app.routes.upload_routes import router as upload_router
 from app.routes.chat_routes import router as chat_router
+# importa upload_routes solo si lo usas
+try:
+    from app.routes.upload_routes import router as upload_router
+except Exception:
+    upload_router = None
+from app.routes.claims_routes import router as claims_router
 
-app = FastAPI(title="Inphormed API", version="0.1")
 
-# Asegura carpetas
-for folder in ["uploads", "outputs"]:
-    os.makedirs(folder, exist_ok=True)
 
-# Static & Templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
-templates = Jinja2Templates(directory="templates")
+app = FastAPI(title="Inphormed API")
+app.include_router(claims_router, prefix="/api/claims", tags=["claims"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # ciérralo en prod
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Routers
-app.include_router(upload_router)
-app.include_router(chat_router)
-app.include_router(ui_router)
+app.include_router(chat_router, prefix="")
+if upload_router:
+    app.include_router(upload_router, prefix="")
 
-# UI
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
-
-# Health
 @app.get("/health")
-def health_check():
+def health():
     return {"status": "ok"}
+@app.get("/")
+def root():
+    return {"message": "Inphormed API está en marcha."}
