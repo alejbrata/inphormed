@@ -1,4 +1,5 @@
-# streamlit_app.py
+# streamlit_app.py  (versión completa con timeout configurable)
+
 import os
 import json
 from typing import List, Dict, Any
@@ -11,6 +12,7 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 CHAT_ENDPOINT = os.getenv("CHAT_ENDPOINT", "/api/chat")
 CLAIMS_VALIDATE_TEXT = os.getenv("CLAIMS_VALIDATE_TEXT", "/api/claims/validate-text")
 CLAIMS_VALIDATE_PPT = os.getenv("CLAIMS_VALIDATE_PPT", "/api/claims/validate-ppt")
+DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT_SEC", "900"))  # ← por defecto 900s
 
 CHAT_URL = BACKEND_URL + CHAT_ENDPOINT
 VALIDATE_TEXT_URL = BACKEND_URL + CLAIMS_VALIDATE_TEXT
@@ -19,17 +21,17 @@ VALIDATE_PPT_URL = BACKEND_URL + CLAIMS_VALIDATE_PPT
 st.set_page_config(page_title="Inphormed", layout="wide")
 
 # ─────────────────────────────────────────────────────────────
-# Helpers HTTP
+# Helpers HTTP (con timeout configurable)
 # ─────────────────────────────────────────────────────────────
-def post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def post_json(url: str, payload: Dict[str, Any], timeout_sec: float) -> Dict[str, Any]:
     import requests
-    r = requests.post(url, json=payload, timeout=120)
+    r = requests.post(url, json=payload, timeout=timeout_sec)
     r.raise_for_status()
     return r.json()
 
-def post_multipart(url: str, files: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+def post_multipart(url: str, files: Dict[str, Any], params: Dict[str, Any], timeout_sec: float) -> Dict[str, Any]:
     import requests
-    r = requests.post(url, files=files, params=params, timeout=300)
+    r = requests.post(url, files=files, params=params, timeout=timeout_sec)
     r.raise_for_status()
     return r.json()
 
@@ -58,7 +60,6 @@ def parse_pptx(file_bytes: bytes) -> List[str]:
         lines = []
         for slide in pres.slides:
             for shape in slide.shapes:
-                # Solo previsualización; la validación real la hace el backend
                 if hasattr(shape, "text_frame") and shape.text_frame:
                     txt = (shape.text_frame.text or "").strip()
                     if txt:
@@ -100,7 +101,7 @@ def hits_table_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────
 # VISTAS
 # ─────────────────────────────────────────────────────────────
-def vista_chatbot_hs():
+def vista_chatbot_hs(timeout_sec: float):
     st.header("Chatbot – Hidradenitis supurativa")
 
     if "chat_hs" not in st.session_state:
@@ -125,7 +126,7 @@ def vista_chatbot_hs():
 
         try:
             with st.spinner("Pensando…"):
-                resp = post_json(CHAT_URL, payload)
+                resp = post_json(CHAT_URL, payload, timeout_sec)
             reply = (resp or {}).get("reply", "").strip() or "No recibí contenido del modelo."
             st.session_state.chat_hs.append({"role": "assistant", "content": reply})
             st.chat_message("assistant").markdown(reply)
@@ -134,19 +135,22 @@ def vista_chatbot_hs():
             st.error(err)
             st.session_state.chat_hs.append({"role": "assistant", "content": err})
 
-def vista_validador_claims():
+def vista_validador_claims(timeout_sec: float):
     st.header("Validador de claims")
 
     with st.sidebar:
         st.subheader("Parámetros de validación")
-        topk = st.number_input("Top-K", min_value=1, max_value=20, value=int(os.getenv("RAG_TOPK", "5")))
+        topk = st.number_input("Top-K", min_value=1, max_value=20, value=int(os.getenv("RAG_TOPK", "8")))
         thr_green = st.slider("Umbral verde", 0.0, 1.0, float(os.getenv("RAG_THR_GREEN", "0.82")), 0.01)
         thr_yellow = st.slider("Umbral amarillo", 0.0, 1.0, float(os.getenv("RAG_THR_YELLOW", "0.70")), 0.01)
         st.caption("Rojo si score < amarillo; Amarillo si entre amarillo y verde; Verde si ≥ verde.")
+        st.divider()
+        st.subheader("Tiempo máximo de espera")
+        timeout_sec = st.number_input("Timeout (segundos)", min_value=60, max_value=3600, value=int(timeout_sec), step=30)
 
     tabs = st.tabs(["Pegar texto", "Subir PPTX"])
 
-    # ——— Pegar texto -> /api/claims/validate-text (uno a uno) ———
+    # ——— Pegar texto -> /api/claims/validate-text ———
     with tabs[0]:
         st.subheader("Claims (uno por línea)")
         txt = st.text_area(
@@ -167,9 +171,10 @@ def vista_validador_claims():
                             "topk": int(topk),
                             "thr_green": float(thr_green),
                             "thr_yellow": float(thr_yellow),
+                            "require_llm": True
                         }
                         try:
-                            res = post_json(VALIDATE_TEXT_URL, payload)
+                            res = post_json(VALIDATE_TEXT_URL, payload, timeout_sec)
                             results.append(res)
                         except Exception as e:
                             results.append({
@@ -189,7 +194,7 @@ def vista_validador_claims():
                 else:
                     st.info("Sin resultados.")
 
-    # ——— Subir PPTX -> /api/claims/validate-ppt (multipart) ———
+    # ——— Subir PPTX -> /api/claims/validate-ppt ———
     with tabs[1]:
         st.subheader("Sube un PPTX con claims")
         f = st.file_uploader("PPTX", type=["pptx"])
@@ -197,11 +202,17 @@ def vista_validador_claims():
             if not f:
                 st.warning("Selecciona un PPTX.")
             else:
-                params = {"topk": int(topk), "thr_green": float(thr_green), "thr_yellow": float(thr_yellow)}
+                params = {
+                    "topk": int(topk),
+                    "thr_green": float(thr_green),
+                    "thr_yellow": float(thr_yellow),
+                    "require_llm": True,
+                    "render_ppt": True
+                }
                 files = {"file": (f.name, f.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation")}
                 try:
                     with st.spinner("Validando claims del PPTX…"):
-                        data = post_multipart(VALIDATE_PPT_URL, files=files, params=params)
+                        data = post_multipart(VALIDATE_PPT_URL, files=files, params=params, timeout_sec=timeout_sec)
                     st.success(f"Archivo: {data['file_name']} — Claims detectados: {data['total_claims']}")
                     rows = hits_table_rows(data.get("results", []))
                     if rows:
@@ -230,6 +241,12 @@ with st.sidebar:
     st.title("Inphormed")
     pagina = st.radio("Menú", list(PAGES.keys()))
 
-PAGES[pagina]()
+# Pasa el timeout a las vistas que lo usan
+if pagina == "Chatbot HS":
+    PAGES[pagina](DEFAULT_TIMEOUT)
+elif pagina == "Validador de claims":
+    PAGES[pagina](DEFAULT_TIMEOUT)
+else:
+    PAGES[pagina]()
 
 st.caption(f"Backend: {BACKEND_URL}")

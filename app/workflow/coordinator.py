@@ -1,236 +1,165 @@
 # app/workflow/coordinator.py
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
-from time import perf_counter
+from typing import Any, Dict, List, Optional
+import traceback
 
-from app.audit.auditor import Auditor
-from app.retrieval.hybrid import RecuperadorHibrido
-from app.orchestrator.orchestrator import Orquestador
-from app.pipeline.ingest import PipelineIngesta
-from app.schemas import ResultadoClaim, Citation
-from app.compliance.engine import ComplianceEngine, ComplianceReport
-
-# Opcionales (si no están aún, degradamos a stub dentro de esta clase)
-try:
-    from app.retrieval.reranker import Reranker  # cross-encoder (opcional)
-except Exception:  # pragma: no cover
-    Reranker = None  # type: ignore
-
-try:
-    from app.utils.query_rewriter import QueryRewriter  # LLM para rewriting (opcional)
-except Exception:  # pragma: no cover
-    QueryRewriter = None  # type: ignore
-
-try:
-    # Validador de claims con LLM (lo añadiremos en la siguiente clase)
-    from app.agents.claims.validator import ClaimsValidator
-except Exception:  # pragma: no cover
-    ClaimsValidator = None  # type: ignore
-
+from app.schemas import Citation, ValidationResult, ComplianceResult, SearchHit
+from app.indexers.vector_indexer import VectorIndexer
+from app.utils.query_rewriter import QueryRewriter
+from app.agents.claims.validator import ClaimsValidator
+from app.normalization.normalizer import NormalizadorDocumento
+from app.ingest.chunker import Chunker
 
 class WorkflowCoordinator:
-    """
-    Coordina el ciclo completo para un claim (slide/línea):
-        0) (Opcional) Query Rewriting con LLM
-        1) RAG local (RecuperadorHibrido [+ Reranker])
-        2) Si evidencia insuficiente → Orquestador de fuentes (race)
-           2.a) Ingesta (PipelineIngesta) de lo encontrado
-           2.b) Reintento RAG local
-        3) (Opcional) Validador de Claims con LLM → etiqueta (GREEN/AMBER/RED)
-           (fallback heurístico si no hay LLM)
-        4) Compliance (EMA/FDA/ALL) sobre claim + citas [+ texto generado si aplica]
-        5) Auditoría: decisión final, latencias por fase, modelos usados, costes LLM (si aplica)
-
-    Esta clase NO hace parsing de archivos (PPT/DOC); se invoca por claim.
-    """
-
     def __init__(
         self,
         *,
-        retriever: Optional[RecuperadorHibrido] = None,
-        reranker: Optional[Any] = None,       # instancia de Reranker o None
-        orchestrador: Optional[Orquestador] = None,
-        ingesta: Optional[PipelineIngesta] = None,
-        compliance: Optional[ComplianceEngine] = None,
-        auditor: Optional[Auditor] = None,
-        query_rewriter: Optional[Any] = None, # instancia de QueryRewriter o None
-        validator: Optional[Any] = None,      # instancia de ClaimsValidator o None
-        min_hits: int = 2,                    # umbral para considerar "evidencia suficiente"
-        citations_limit: int = 3,             # nº máx de citas que adjuntamos
+        query_rewriter: QueryRewriter,
+        validator: ClaimsValidator,
+        indexer: VectorIndexer,
+        auditor: Any = None,
+        citations_limit: int = 3,
+        min_hits: int = 1,
     ) -> None:
-        self.auditor = auditor or Auditor()
-        self.retriever = retriever or RecuperadorHibrido(auditor=self.auditor)
-        self.reranker = reranker  # puede ser None
-        self.orchestrador = orchestrador or Orquestador()
-        self.ingesta = ingesta or PipelineIngesta(auditor=self.auditor)
-        self.compliance = compliance or ComplianceEngine(auditor=self.auditor)
-        self.query_rewriter = query_rewriter  # puede ser None
-        self.validator = validator            # puede ser None
+        self.query_rewriter = query_rewriter
+        self.validator = validator
+        self.indexer = indexer
+        self.auditor = auditor
+        self.citations_limit = int(citations_limit)
+        self.min_hits = int(min_hits)
+        self._normalizador = NormalizadorDocumento()
+        self._chunker = Chunker()
 
-        self.min_hits = max(1, min_hits)
-        self.citations_limit = max(1, citations_limit)
+    def _audit(self, event: str, intake_id: str, claim_id: str, payload: Dict[str, Any]) -> None:
+        if not self.auditor:
+            return
+        data = {"event": event, "intake_id": intake_id, "claim_id": claim_id, **(payload or {})}
+        try:
+            if hasattr(self.auditor, "log_event"):
+                try:
+                    self.auditor.log_event(event, data); return
+                except TypeError:
+                    self.auditor.log_event(data); return
+            for m in ("log", "write", "emit", "record"):
+                if hasattr(self.auditor, m):
+                    try: getattr(self.auditor, m)(event, data); return
+                    except TypeError: getattr(self.auditor, m)(data); return
+        except Exception:
+            pass
 
-    # ----------------------------
-    # API principal (por claim)
-    # ----------------------------
+    @staticmethod
+    def _hits_to_citations(hits: List[SearchHit], limit: int) -> List[Citation]:
+        out: List[Citation] = []
+        for h in hits[: max(0, limit)]:
+            c = h.chunk
+            out.append(
+                Citation(
+                    source=c.source,
+                    url=c.url,
+                    title=c.title,
+                    span_start=c.span_start,
+                    span_end=c.span_end,
+                    doc_hash=c.doc_hash,
+                    score=h.score,
+                    # ← si vienen en payload del indexer, puedes añadir pmid/doi aquí
+                )
+            )
+        return out
+
+    def _call_agent_flex(self, agent: Any, *, claim: str, query: str, top_k: int = 8) -> List[Any]:
+        for name in ("buscar", "search", "fetch", "run"):
+            if hasattr(agent, name):
+                fn = getattr(agent, name)
+                try:
+                    return fn(claim=claim, query=query, top_k=top_k)
+                except TypeError:
+                    try:
+                        return fn(query)
+                    except TypeError:
+                        try:
+                            return fn(claim, query)
+                        except Exception:
+                            pass
+        return []
+
     def resolver_claim(
         self,
         *,
         claim: str,
         intake_id: str,
         claim_id: str,
-        agentes_fuente: Optional[List[Any]] = None,  # lista de AgenteFuente
-        timeout_agentes_s: int = 8,
-        top_k: int = 12,
-        generated_text: Optional[str] = None,        # si ya generaste borrador de material
-        meta: Optional[dict] = None,                 # approved_indications, etc.
-        costs: Optional[Dict[str, float]] = None,    # costes LLM si aplica
+        agentes_fuente: List[Any],
+        generated_text: Optional[str],
+        meta: Dict[str, Any],
+        require_llm: bool = True,
+        top_k: int = 8,
     ) -> Dict[str, Any]:
-        timings: Dict[str, float] = {}
-        models_info: Dict[str, Any] = {}
-        costs = costs or {}
+        q0 = (claim or "").strip()
+        self._audit("StartClaim", intake_id, claim_id, {"claim": q0})
 
-        # ---------------- 0) Query Rewriting (opcional, IA generativa) ----------------
-        t0 = perf_counter()
-        query = claim
-        rewrites_used: List[str] = []
+        # 1) Reescritura
+        q_rw = self.query_rewriter.rewrite(q0, require_llm=require_llm)
+        self._audit("QueryRewriterLLM", intake_id, claim_id, {"orig": q0, "rewritten": q_rw})
 
-        if self.query_rewriter is not None:
-            try:
-                rewrites: List[str] = self.query_rewriter.rewrite(claim)
-                if rewrites:
-                    # Usamos la primera reescritura como query principal; guardamos el resto para fallback si quisieras.
-                    query = rewrites[0]
-                    rewrites_used = rewrites
-                models_info["llm_query_rewriter"] = getattr(self.query_rewriter, "model_name", "unknown")
-            except Exception:
-                # degradamos a identidad
-                rewrites_used = []
-        timings["rewrite_ms"] = (perf_counter() - t0) * 1000.0
+        # 2) Primer RAG
+        hits = self.indexer.search(q_rw, top_k=top_k) if q_rw else []
+        self._audit("VectorSearch", intake_id, claim_id, {"hits": len(hits)})
 
-        # ---------------- 1) RAG local ----------------
-        t1 = perf_counter()
-        hits = self.retriever.buscar(query, top_k=top_k, intake_id=intake_id, claim_id=claim_id)
+        # 3) Agentes solo si no alcanzamos min_hits
+        if len(hits) < self.min_hits:
+            for ag in (agentes_fuente or []):
+                try:
+                    raw_results = self._call_agent_flex(ag, claim=q0, query=q_rw, top_k=top_k)
+                except Exception as e:
+                    self._audit("AgentError", intake_id, claim_id, {"agent": ag.__class__.__name__, "error": str(e)})
+                    continue
 
-        # Reranker opcional
-        if self.reranker is not None:
-            try:
-                hits = self.reranker.reordenar(query, hits)
-                models_info["reranker_model"] = getattr(self.reranker, "model_name", "unknown")
-            except Exception:
-                pass
-
-        timings["retrieval_ms"] = (perf_counter() - t1) * 1000.0
-
-        # ---------------- 2) Escalado a agentes (si evidencia insuficiente) -----------
-        t2 = perf_counter()
-        escalated = False
-        if len(hits) < self.min_hits and agentes_fuente:
-            self.orchestrador.set_agentes(agentes_fuente)
-            res = self.orchestrador.resolver_claim(claim, timeout_seconds=timeout_agentes_s)
-            if res is not None:
-                escalated = True
-                # Ingestamos lo encontrado y repetimos RAG
-                meta_ing = self.ingesta.ingerir_resultado(res, intake_id=intake_id)
-                # Reintento RAG (podrías reusar 'query' o regenerar con rewrites)
-                hits = self.retriever.buscar(query, top_k=top_k, intake_id=intake_id, claim_id=claim_id)
-                if self.reranker is not None:
+                ingested = 0
+                for r in (raw_results or []):
                     try:
-                        hits = self.reranker.reordenar(query, hits)
-                    except Exception:
-                        pass
-                models_info.setdefault("ingest", {})["last"] = meta_ing
-        timings["agents_plus_ingest_ms"] = (perf_counter() - t2) * 1000.0
+                        udoc = self._normalizador.normalizar(r)
+                        chunks = self._chunker.chunk(udoc)
+                        if chunks:
+                            ingested += self.indexer.index(chunks)
+                    except Exception as e:
+                        self._audit("IngestError", intake_id, claim_id, {
+                            "agent": ag.__class__.__name__,
+                            "error": str(e),
+                            "trace": traceback.format_exc()[:1200],
+                        })
 
-        # ---------------- 3) Citas (pasajes concretos) --------------------------------
-        t3 = perf_counter()
-        citations: List[Citation] = self.retriever.a_citas(hits, limit=self.citations_limit)
-        timings["citations_ms"] = (perf_counter() - t3) * 1000.0
+                if ingested:
+                    # Reintenta RAG tras este agente y corta si ya es suficiente
+                    hits = self.indexer.search(q_rw, top_k=top_k) if q_rw else []
+                    self._audit("VectorSearchRetry", intake_id, claim_id, {"hits": len(hits), "after_agent": ag.__class__.__name__})
+                    if len(hits) >= self.min_hits:
+                        break
 
-        # ---------------- 4) Etiqueta del claim (LLM o heurística) --------------------
-        t4 = perf_counter()
-        label = "AMBER"  # por defecto, conservador
-        rationale = None
-        if self.validator is not None:
-            try:
-                result = self.validator.validate(claim=claim, citations=citations, generated_text=generated_text, meta=meta or {})
-                # Se espera que el validador devuelva dict con "label" y opcional "rationale"
-                label = str(result.get("label", "AMBER")).upper()
-                rationale = result.get("rationale")
-                models_info["llm_claims_validator"] = getattr(self.validator, "model_name", "unknown")
-                costs.update(result.get("costs", {}))
-            except Exception:
-                label = self._heuristic_label(citations)
-        else:
-            label = self._heuristic_label(citations)
-        timings["classify_ms"] = (perf_counter() - t4) * 1000.0
+        citations = self._hits_to_citations(hits, self.citations_limit)
 
-        # ---------------- 5) Compliance ------------------------------------------------
-        t5 = perf_counter()
-        comp_report: ComplianceReport = self.compliance.run_checks(
-            claim=claim,
+        thr_meta = {}
+        if isinstance(meta, dict):
+            for k in ("thr_green", "thr_yellow"):
+                if k in meta: thr_meta[k] = meta[k]
+
+        vres: ValidationResult = self.validator.validate(
+            claim=q0,
             citations=citations,
-            generated_text=generated_text,
-            meta=meta or {},
-            intake_id=intake_id,
-            claim_id=claim_id,
+            generated_text=(generated_text or q0),
+            require_llm=require_llm,
+            metadata=thr_meta,
         )
-        timings["compliance_ms"] = (perf_counter() - t5) * 1000.0
+        self._audit("Validated", intake_id, claim_id, {"label": vres.label})
 
-        # ---------------- 6) Resultado + Auditoría -----------------------------------
-        top_url = citations[0].url if citations else None
-        resultado = ResultadoClaim(
-            claim=claim,
-            label=label,         # GREEN / AMBER / RED
-            top_url=top_url,
-            citations=citations,
-            meta={
-                "escalated": escalated,
-                "rewrites_used": rewrites_used,
-                "rationale": rationale,
-                "compliance_score": comp_report.score,
-                "compliance_passed": comp_report.passed,
-                "compliance_issues": [i.model_dump() for i in comp_report.issues],
-            },
-        )
-
-        # Modelos usados (embedding viene del retriever.vector_indexer)
-        try:
-            models_info["embedding_model"] = getattr(self.retriever.vec, "model_name", None)
-        except Exception:
-            pass
-
-        # Auditoría final
-        self.auditor.log_decision(
-            intake_id=intake_id,
-            claim_id=claim_id,
-            resultado_claim=resultado,
-            citations=citations,
-            timings_ms=timings,
-            costs=costs,
-            model_info=models_info,
-        )
+        cres: ComplianceResult = self.validator.compliance_for((generated_text or q0), citations)
+        self._audit("Compliance", intake_id, claim_id, {"score": cres.score, "passed": cres.passed})
 
         return {
-            "resultado": resultado,
-            "compliance": comp_report,
-            "timings_ms": timings,
-            "models": models_info,
+            "resultado": vres,
+            "compliance": cres,
+            "models": {
+                "rewriter_model": self.query_rewriter.model_used(),
+                "validator_model": self.validator.model_used(),
+            },
         }
-
-    # ---------------- Helpers ----------------
-    @staticmethod
-    def _heuristic_label(citations: List[Citation]) -> str:
-        """
-        Fallback rápido y conservador si no hay LLM:
-        - 0 citas → RED
-        - 1 cita  → AMBER
-        - >=2     → GREEN
-        """
-        n = len(citations)
-        if n == 0:
-            return "RED"
-        if n == 1:
-            return "AMBER"
-        return "GREEN"

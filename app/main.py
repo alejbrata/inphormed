@@ -1,34 +1,36 @@
-# app/main.py
+from __future__ import annotations
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes.chat_routes import router as chat_router
-# importa upload_routes solo si lo usas
-try:
-    from app.routes.upload_routes import router as upload_router
-except Exception:
-    upload_router = None
-from app.routes.claims_routes import router as claims_router
+from app.api.claims import router as claims_router
+from app.api.chat import router as chat_router  # ← añade el router del chat
 
+app = FastAPI(title="Inphormed API", version="0.1.0")
 
-
-app = FastAPI(title="Inphormed API")
-app.include_router(claims_router, prefix="/api/claims", tags=["claims"])
+# CORS (ajústalo a tu frontend si lo sirves desde otro host/puerto)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ciérralo en prod
+    allow_origins=[
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+        "*",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(chat_router, prefix="")
-if upload_router:
-    app.include_router(upload_router, prefix="")
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-@app.get("/")
-def root():
-    return {"message": "Inphormed API está en marcha."}
+
+# Routers
+app.include_router(chat_router)    # ← expone /api/chat
+app.include_router(claims_router)  # ← expone /api/claims/*
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
