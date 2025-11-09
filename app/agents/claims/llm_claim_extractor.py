@@ -1,301 +1,231 @@
 # -*- coding: utf-8 -*-
 """
-LLM-first extractor: detecta qué frases de cada slide son CLAIM y cuáles son DATOS/REFERENCIAS,
-sin imponer formato al PPT de origen. Usa:
-  1) Split heurístico de texto a "líneas candidatas".
-  2) Clasificación por LLM (JSON estricto) claim|data|reference + confidence 0..1.
-  3) Reglas ligeras de verificación y deduplicado.
-  4) Fallback heurístico si el LLM falla.
+Extractor LLM de CLAIMS desde PPTX (IA generativa primero).
+- Ignora líneas "de datos" (%, p-values, n=..., HR/OR/RR, DOI/PMID, metadatos).
+- Aplica umbral de confianza.
+- Devuelve items con slide_index (1-based), text, score y debug.
 
 Requisitos:
-  - python-pptx
-  - openai>=1.0.0 (cliente nuevo)
-  - pydantic
-
-Variables de entorno:
-  - OPENAI_API_KEY (obligatoria)
-  - OPENAI_MODEL (opcional; por defecto 'gpt-4o-mini')
-
-Uso rápido:
-  from app.claims.llm_claim_extractor import extract_claims_from_pptx_llm
-  claims = extract_claims_from_pptx_llm("claims_ppt_01.pptx", max_claims_per_slide=1)
+  pip install python-pptx openai
+Variables:
+  OPENAI_API_KEY   (obligatoria)
+  OPENAI_MODEL     (opcional, por defecto: gpt-4o-mini)
 """
 
 from __future__ import annotations
+import io
+import os
+import re
+import json
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Tuple
-import os, re, json, hashlib, time
-from difflib import SequenceMatcher
+from typing import List, Dict, Any, Iterable
 
 from pptx import Presentation
-from pptx.enum.shapes import PP_PLACEHOLDER
+from openai import OpenAI
 
-from pydantic import BaseModel, ValidationError, Field
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# -------------------------- Utilidades base --------------------------
+SYSTEM_PROMPT = """Eres un extractor de CLAIMS científicos en material farmacéutico.
+Tu tarea: dado el texto de UNA DIAPOSITIVA, devuelve a lo sumo N *claims* claros.
+Qué es un claim: afirmación sustantiva verificable (eficacia, seguridad, comparación con SOC, reducción de riesgo, endpoints clínicos, etc.).
+Qué NO es un claim: cifras sueltas, porcentajes, p-values, "n =", IC 95%, notas legales, referencias, DOI/PMID, fechas o metadatos.
 
-def _norm(txt: str) -> str:
-    t = (txt or "").strip().lower()
-    t = re.sub(r"\s+", " ", t)
-    return t
+Devuelve SOLO JSON con esta forma:
+{
+  "claims": [
+    {"text": "...", "confidence": 0.0-1.0},
+    ...
+  ]
+}
 
-def _similar(a: str, b: str) -> float:
-    return SequenceMatcher(None, a, b).ratio()
+Reglas:
+- No incluyas líneas que "huelan a datos" (%/p=/n=/IC/HR/OR/RR/PMID/DOI/fechas).
+- Resume el claim si aparece fragmentado.
+- Máximo N claims (según te indique el usuario).
+- Si no hay claims, devuelve {"claims": []}.
+"""
 
-def _split_candidates(text: str) -> List[str]:
-    """
-    Divide un cuadro de texto en frases "candidatas" a claim.
-    Conservadora: tira lo muy corto/larguísimo y limpia bullets.
-    """
-    if not text:
-        return []
-    t = text.replace("•", "\n").replace("▪", "\n").replace("·", "\n").replace("●", "\n")
-    # Partición por líneas y por punto+espacio (evitando abreviaturas típicas)
-    raw = re.split(r"\n+|(?<=[^A-ZÁÉÍÓÚ0-9])\.\s+", t)
-    out = []
-    for chunk in raw:
-        c = re.sub(r"\s+", " ", chunk).strip()
-        c = re.sub(r"^\s*(claim|conclusión|conclusion)[:#\-\s]*", "", c, flags=re.I)
-        if not c:
-            continue
-        if len(c) < 20:
-            continue
-        if len(c) > 300:
-            continue
-        out.append(c)
+USER_PROMPT_TMPL = """Extrae como máximo {max_n} claims del siguiente texto de una diapositiva.
+Devuelve SOLO el JSON pedido (sin comentarios).
+
+[Slide title]: {title}
+[Slide text]:
+{body}
+"""
+
+# -------- Heurísticas anti "datos" --------
+
+DATA_PATTERNS = [
+    r"\b\d{1,3}\s?%\b",                  # porcentajes
+    r"\bp\s*[<=>]\s*0\.\d+",             # p-values
+    r"\bIC\s*95%|\bCI\s*95%",            # intervalos de confianza
+    r"\bn\s*=\s*\d+",                    # tamaño muestral
+    r"\b(HR|OR|RR)\s*=\s*\d+(\.\d+)?",   # hazard/odds/risk ratios
+    r"\bDOI\b|\bPMID\b",                 # bibliografía
+    r"\b(Generado|Fecha|Updated)\s*:\s*\d{4}-\d{2}-\d{2}",  # metadatos slide
+]
+DATA_REGEX = re.compile("|".join(DATA_PATTERNS), flags=re.IGNORECASE)
+
+def _is_data_like(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(DATA_REGEX.search(t))
+
+# -------- Utils --------
+
+def _clean_line(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _dedupe_keep_order(items: Iterable[str]) -> List[str]:
+    seen, out = set(), []
+    for x in items:
+        x = (x or "").strip()
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
     return out
 
-# Señales "de datos" (p-values, CI, %, n=, DOIs/PMIDs, métricas)
-PAT_REF = re.compile(r"(pmid|doi|https?://|et al\.)", re.I)
-PAT_P   = re.compile(r"\bp\s*([<=>]|=)\s*0?\.\d+\b", re.I)
-PAT_CI  = re.compile(r"(ic\s*95%|95%\s*ci|ci\s*95%)", re.I)
-PAT_N   = re.compile(r"\bn\s*=\s*\d+", re.I)
-PAT_PCT = re.compile(r"\d{1,3}(\.\d+)?\s*%")
-PAT_METRIC = re.compile(r"\b(hr|or|rr|sd|se|i2|i²|md)\b", re.I)
+def _slide_texts(slide) -> List[str]:
+    lines: List[str] = []
+    for shape in slide.shapes:
+        if hasattr(shape, "text_frame") and getattr(shape, "has_text_frame", False):
+            txt = (shape.text_frame.text or "").strip()
+            if txt:
+                for raw in txt.splitlines():
+                    ln = _clean_line(raw)
+                    if ln:
+                        lines.append(ln)
+    return lines
 
-def _is_data_like(line: str) -> bool:
-    return any(p.search(line) for p in (PAT_REF, PAT_P, PAT_CI, PAT_N, PAT_PCT, PAT_METRIC))
+def _slide_title(slide) -> str:
+    try:
+        t = slide.shapes.title
+        if t and t.has_text_frame:
+            return _clean_line(t.text_frame.text or "")
+    except Exception:
+        pass
+    for ln in _slide_texts(slide):
+        if len(ln) >= 12:
+            return ln
+    return ""
 
-# -------------------------- Esquema de salida del LLM --------------------------
-
-class LLMItem(BaseModel):
-    index: int = Field(..., description="Índice del candidato en la lista de entrada")
-    label: str = Field(..., description="Una de: claim | data | reference")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Confianza 0..1")
-    reason: str = Field(..., description="Razonamiento breve (≤ 25 palabras)")
-    claim_text: str | None = Field(None, description="Texto del claim normalizado, si aplica")
-
-class LLMResponse(BaseModel):
-    items: List[LLMItem]
-
-# -------------------------- Cliente OpenAI --------------------------
-
-def _get_openai_client_and_model():
-    from openai import OpenAI
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Falta OPENAI_API_KEY")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    return OpenAI(api_key=api_key), model
-
-def llm_classify_candidates(title: str, candidates: List[str], retries: int = 2) -> List[LLMItem]:
-    """
-    Envía hasta ~30 líneas candidatas de una slide al LLM en un único batch.
-    Devuelve lista de LLMItem alineada por 'index'.
-    """
-    if not candidates:
-        return []
-
-    client, model = _get_openai_client_and_model()
-
-    # Prompt compacto y normativo
-    sys = (
-        "Eres analista médico-regulatorio. Clasifica cada texto como:\n"
-        "- 'claim': afirmación promocional o conclusiva (p.ej., superioridad, eficacia, seguridad, efecto clínico).\n"
-        "- 'data': datos/soporte (p-valores, IC, porcentajes, tamaños muestrales, metodología, descripciones de estudio).\n"
-        "- 'reference': citas, DOIs, URLs, 'et al.'\n"
-        "Devuelve JSON estricto con 'items'. NO inventes, NO mezcles candidatos.\n"
-        "Si 'label'='claim', rellena 'claim_text' con la frase resumida y clara (sin datos ni paréntesis).\n"
-        "Usa confianza 0..1. Sé conservador: si dudas, no lo marques como claim."
-    )
-
-    user_payload = {
-        "title": title or "",
-        "candidates": [{"index": i, "text": c} for i, c in enumerate(candidates)]
-    }
-
-    # Few-shot mínimo dentro del prompt de usuario
-    fewshot = {
-        "examples": [
-            {"text": "El tratamiento X reduce las exacerbaciones un 30% frente a placebo.", "label": "claim"},
-            {"text": "p=0.03; HR=0.82 (IC95% 0.70–0.96).", "label": "data"},
-            {"text": "García et al. 2021; doi:10.1000/xyz123", "label": "reference"},
-            {"text": "X demostró no-inferioridad vs Y en control glucémico.", "label": "claim"},
-        ]
-    }
-
-    messages = [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": json.dumps({"slide_title": title, **fewshot, **user_payload}, ensure_ascii=False)}
-    ]
-
-    for attempt in range(1 + retries):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            raw = resp.choices[0].message.content
-            data = json.loads(raw)
-            parsed = LLMResponse(**data)
-            return parsed.items
-        except Exception as e:
-            if attempt >= retries:
-                # último intento fallido -> devolvemos lista vacía (fallback arriba)
-                return []
-            time.sleep(0.5 * (attempt + 1))
-
-# -------------------------- Pipeline por slide --------------------------
+# -------- Modelo --------
 
 @dataclass
 class ClaimHit:
-    slide_index: int
+    slide_index: int      # 1-based
     text: str
-    score: float
+    score: float          # [0..1]
     debug: Dict[str, Any]
 
-def _dedupe(hits: List[ClaimHit], threshold: float = 0.90) -> List[ClaimHit]:
-    out: List[ClaimHit] = []
-    seen: set[str] = set()
-    for h in sorted(hits, key=lambda x: x.score, reverse=True):
-        n = _norm(h.text)
-        hsh = hashlib.sha1(n.encode("utf-8")).hexdigest()
-        if hsh in seen:
-            continue
-        if any(_similar(_norm(o.text), n) >= threshold for o in out):
-            continue
-        seen.add(hsh)
-        out.append(h)
-    return out
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
-def _fallback_label(line: str) -> Tuple[str, float]:
-    """
-    Fallback muy simple: si huele a datos, 'data', si no, 'claim' bajito.
-    """
-    if _is_data_like(line):
-        return "data", 0.25
-    # pistas de claim (comparativos/verbos)
-    if re.search(r"\b(reduce|reduces|mejora|improves|aumenta|increases|demuestra|demonstrates|superior|non[- ]?inferior)\b", _norm(line)):
-        return "claim", 0.55
-    return "data", 0.30
+# -------- LLM --------
 
-def process_slide(idx: int, slide, max_claims_per_slide: int) -> List[ClaimHit]:
-    # título (ayuda contextual)
+def _call_llm_extract_claims(client: OpenAI, title: str, body: str, max_n: int) -> List[Dict[str, Any]]:
+    user_prompt = USER_PROMPT_TMPL.format(max_n=max_n, title=title or "(sin título)", body=body)
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    raw = (resp.choices[0].message.content or "").strip()
     try:
-        title = slide.shapes.title.text or ""
+        data = json.loads(raw)
+        claims = data.get("claims", [])
+        if not isinstance(claims, list):
+            return []
+        out = []
+        for it in claims:
+            if not isinstance(it, dict):
+                continue
+            txt = _clean_line(it.get("text", ""))
+            if not txt:
+                continue
+            conf = it.get("confidence", 0.75)
+            try:
+                conf = float(conf)
+            except Exception:
+                conf = 0.75
+            out.append({"text": txt, "confidence": conf})
+        return out[:max_n]
     except Exception:
-        title = ""
+        # Fallback si llega texto plano
+        lines = [ln.strip("-• ").strip() for ln in raw.splitlines() if ln.strip()]
+        lines = [ln for ln in lines if len(ln) >= 8]
+        lines = _dedupe_keep_order(lines)[:max_n]
+        return [{"text": ln, "confidence": 0.70} for ln in lines]
 
-    # 1) Recolectar shapes textuales (sin tablas)
-    shapes: List[Tuple[str, str, bool, bool]] = []
-    for sh in slide.shapes:
-        if getattr(sh, "has_table", False) and sh.has_table:
-            continue
-        if not getattr(sh, "has_text_frame", False):
-            continue
-        txt = (sh.text or "").strip()
-        if not txt:
-            continue
-        is_title = is_body = False
-        try:
-            if getattr(sh, "is_placeholder", False):
-                pht = sh.placeholder_format.type
-                is_title = (pht == PP_PLACEHOLDER.TITLE)
-                is_body  = (pht == PP_PLACEHOLDER.BODY)
-        except Exception:
-            pass
-        shapes.append((txt, getattr(sh, "name", "") or "", is_title, is_body))
+# -------- Público --------
 
-    # 2) Split a candidatos
-    candidates: List[str] = []
-    for txt, _, _, _ in shapes:
-        candidates.extend(_split_candidates(txt))
-
-    # 3) Clasificación por LLM en batch
-    labeled: Dict[int, LLMItem] = {}
-    if candidates:
-        items = llm_classify_candidates(title, candidates) or []
-        for it in items:
-            if 0 <= it.index < len(candidates):
-                labeled[it.index] = it
-
-    # 4) Selección de CLAIMs
-    hits: List[ClaimHit] = []
-    for i, cand in enumerate(candidates):
-        if i in labeled:
-            it = labeled[i]
-            lab = it.label.lower().strip()
-            if lab == "claim":
-                # verificación ligera: si el texto está repleto de números, baja la puntuación
-                penalty = 0.0
-                if _is_data_like(cand):
-                    penalty = 0.15
-                score = max(0.0, min(1.0, it.confidence - penalty))
-                text_final = (it.claim_text or cand).strip()
-                hits.append(ClaimHit(
-                    slide_index=idx,
-                    text=text_final,
-                    score=score,
-                    debug={"llm": it.model_dump(), "penalty_data_like": penalty, "original": cand, "slide_title": title}
-                ))
-        else:
-            # Fallback si el LLM falló/timeout
-            lab, conf = _fallback_label(cand)
-            if lab == "claim":
-                hits.append(ClaimHit(
-                    slide_index=idx,
-                    text=cand.strip(),
-                    score=conf,
-                    debug={"fallback": True, "original": cand, "slide_title": title}
-                ))
-
-    # 5) Ordenar por score y limitar por slide
-    hits.sort(key=lambda h: (-h.score, h.text))
-    if max_claims_per_slide > 0:
-        hits = hits[:max_claims_per_slide]
-    return hits
-
-# -------------------------- API principal --------------------------
-
-def extract_claims_from_pptx_llm(path: str,
+def extract_claims_from_pptx_llm(path_pptx: str,
                                  max_claims_per_slide: int = 1,
-                                 global_dedupe: bool = True) -> List[Dict[str, Any]]:
+                                 min_confidence: float = 0.60) -> List[Dict[str, Any]]:
     """
-    Extrae claims con ayuda del LLM. Por defecto 1 claim/slide (ajústalo si tu deck trae varios).
+    Procesa un PPTX con un LLM y devuelve:
+      [ { "slide_index": 1, "text": "...", "score": 0.82, "debug": {...} }, ... ]
     """
-    prs = Presentation(path)
-    all_hits: List[ClaimHit] = []
-    for idx, slide in enumerate(prs.slides):
-        all_hits.extend(process_slide(idx, slide, max_claims_per_slide=max_claims_per_slide))
+    with open(path_pptx, "rb") as f:
+        data = io.BytesIO(f.read())
+    pres = Presentation(data)
 
-    if global_dedupe:
-        all_hits = _dedupe(all_hits, threshold=0.90)
+    client = OpenAI()
 
-    # Orden final estable
-    all_hits.sort(key=lambda h: (h.slide_index, -h.score, h.text))
-    return [asdict(h) for h in all_hits]
+    hits: List[ClaimHit] = []
 
+    for idx, slide in enumerate(pres.slides, start=1):
+        title = _slide_title(slide)
+        lines = _slide_texts(slide)
+        if not lines:
+            continue
 
-# -------------------------- CLI rápido (opcional) --------------------------
+        # Pre-filtrado local de ruido "de datos"
+        body_lines = [ln for ln in lines if not _is_data_like(ln)]
+        if not body_lines:
+            continue
 
-if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("pptx_path")
-    ap.add_argument("--per_slide", type=int, default=1)
-    args = ap.parse_args()
+        body = "\n".join(body_lines)
 
-    res = extract_claims_from_pptx_llm(args.pptx_path, max_claims_per_slide=args.per_slide)
-    print(json.dumps(res, ensure_ascii=False, indent=2))
+        # LLM: extrae hasta N claims por slide
+        llm_items = _call_llm_extract_claims(client, title, body, max_claims_per_slide)
+        for it in llm_items:
+            cand = it.get("text", "").strip()
+            if not cand:
+                continue
+            if _is_data_like(cand):
+                continue
+            score = float(it.get("confidence", 0.0))
+            if score < min_confidence:
+                continue
+
+            hit = ClaimHit(
+                slide_index=idx,
+                text=_clean_line(cand),
+                score=score,
+                debug={
+                    "title": title,
+                    "slide_body_preview": body[:600],
+                    "llm_raw": it,
+                    "filters": {"min_confidence": min_confidence, "anti_data": True},
+                },
+            )
+            hits.append(hit)
+
+    # Dedupe por (slide_index, text)
+    key = set()
+    unique: List[ClaimHit] = []
+    for h in hits:
+        k = (h.slide_index, h.text.lower())
+        if k not in key:
+            key.add(k)
+            unique.append(h)
+
+    unique.sort(key=lambda h: (h.slide_index, -h.score))
+    return [h.model_dump() for h in unique]
