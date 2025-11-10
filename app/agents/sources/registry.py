@@ -4,6 +4,8 @@ from typing import List, Any
 # Si tu interfaz vive aquí:
 from .base import AgenteFuente
 from .europepmc import AgenteEuropePMC
+from .pubmed import AgentePubMed
+from .crossref import AgenteCrossref
 # from .ctgov import AgenteCTGov  # déjalo comentado hasta que tenga implementación real
 
 
@@ -20,7 +22,8 @@ def get_default_sources(*, indexer: Any = None, auditor: Any = None, **kwargs) -
     """
     agentes: List[AgenteFuente] = [
         AgenteEuropePMC(),
-        # AgenteCTGov(),
+        AgentePubMed(),
+        AgenteCrossref(),# AgenteCTGov(),
     ]
     return agentes
 

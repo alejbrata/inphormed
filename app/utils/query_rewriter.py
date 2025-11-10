@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Optional, List, Dict, Any
-
+from app.config.settings import settings
 # Soporta SDK nuevo y legacy sin romper
 _OPENAI_CLIENT = None
 def _get_openai_client(api_key: str):
@@ -25,7 +25,7 @@ def _get_openai_client(api_key: str):
     except Exception:
         return None
 
-from app.config.settings import settings
+
 
 
 class QueryRewriter:

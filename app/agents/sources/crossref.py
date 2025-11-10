@@ -1,76 +1,47 @@
-# app/agents/sources/crossref.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
-import requests
-from typing import List, Optional
+from typing import List, Dict, Any
+from datetime import datetime
+import os, re, requests
 
-from app.agents.claims.base import AgenteFuente
-from app.schemas import ResultadoFuente
-from app.audit.auditor import Auditor
-from app.ingest.chunker import create_chunks
+from .base import AgenteFuente
 
-CROSSREF_URL = "https://api.crossref.org/works"
+CROSSREF = "https://api.crossref.org/works"
+MAILTO = os.getenv("CROSSREF_MAILTO", "")
+
+JATS_TAGS = re.compile(r"</?[^>]+>")
+
+def _clean_abstract(s: str) -> str:
+    s = (s or "").strip()
+    return JATS_TAGS.sub("", s)
+
+def search(query: str, page_size: int = 8, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    params = {"query": query, "rows": int(page_size)}
+    if MAILTO:
+        params["mailto"] = MAILTO
+    r = requests.get(CROSSREF, params=params, timeout=timeout)
+    r.raise_for_status()
+    data = (r.json() or {}).get("message", {})
+    out: List[Dict[str, Any]] = []
+    for it in data.get("items", []) or []:
+        doi = (it.get("DOI") or "").strip() or None
+        title_list = it.get("title") or []
+        title = (title_list[0] if title_list else "").strip()
+        abstract = _clean_abstract(it.get("abstract") or "")
+        out.append({
+            "source": "crossref",
+            "pmid": None,
+            "doi": doi,
+            "url": (f"https://doi.org/{doi}" if doi else ""),
+            "title": title,
+            "abstract": abstract,
+            "year": (it.get("issued", {}).get("date-parts", [[None]])[0][0]),
+            "journal": (it.get("container-title", [None])[0]),
+        })
+    return out
 
 class AgenteCrossref(AgenteFuente):
-    """
-    Crossref: buena puerta para DOIs + metadatos (título, revista, fecha). A menudo sin abstract.
-    """
-    def __init__(self, indexer=None, auditor: Optional[Auditor]=None, rows:int=20):
-        self.indexer = indexer
-        self.auditor = auditor or Auditor()
-        self.rows = rows
-
-    def fuente(self) -> str:
-        return "crossref"
-
-    def buscar(self, claim: str, top_k:int=10, idioma: Optional[str]="en") -> List[ResultadoFuente]:
-        params = {
-            "query": claim,
-            "rows": min(top_k, self.rows),
-            "select": "DOI,title,author,container-title,issued,page,volume,issue,URL,language"
-        }
-        self.auditor.log("Crossref.query", {"params": params})
-        r = requests.get(CROSSREF_URL, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        items = data.get("message", {}).get("items", []) or []
-        out: List[ResultadoFuente] = []
-        for it in items[:top_k]:
-            doi = it.get("DOI")
-            title = (it.get("title") or [""])[0]
-            url = it.get("URL") or (f"https://doi.org/{doi}" if doi else "")
-            year = None
-            issued = it.get("issued", {}).get("date-parts", [])
-            if issued and issued[0]:
-                year = str(issued[0][0])
-            # Crossref suele no traer abstract → text vacío (servirá como señal para que otro agente lo complete)
-            meta = {
-                "doi": doi,
-                "journal": (it.get("container-title") or [""])[0],
-                "volume": it.get("volume"),
-                "issue": it.get("issue"),
-                "pages": it.get("page"),
-                "language": it.get("language"),
-                "authors": it.get("author"),
-            }
-            out.append(ResultadoFuente(
-                source=self.fuente(),
-                id_externo=doi or url or title,
-                title=title,
-                url=url,
-                published_at=year,
-                license=None,
-                text="",
-                metadata=meta
-            ))
-        self.auditor.log("Crossref.results", {"count": len(out)})
-        return out
-
-    def ingerir_y_indexar(self, res: List[ResultadoFuente]) -> int:
-        if not res or not self.indexer:
-            return 0
-        total = 0
-        for r in res:
-            chunks = create_chunks(r)
-            total += self.indexer.index(chunks)
-        self.auditor.log("Crossref.indexed", {"chunks": total})
-        return total
+    name = "crossref"
+    timeout_default = 15.0
+    def buscar(self, claim: str, deadline: datetime):
+        return None

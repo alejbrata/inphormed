@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Extractor LLM de CLAIMS desde PPTX (IA generativa primero).
-- Ignora líneas "de datos" (%, p-values, n=..., HR/OR/RR, DOI/PMID, metadatos).
+- Ignora "líneas de datos" (%, p-values, n=..., HR/OR/RR, DOI/PMID, metadatos).
 - Aplica umbral de confianza.
 - Devuelve items con slide_index (1-based), text, score y debug.
 
@@ -18,16 +18,18 @@ import os
 import re
 import json
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Iterable
+from typing import List, Dict, Any, Iterable, Optional
 
 from pptx import Presentation
 from openai import OpenAI
+
+# ---------------- Config LLM ----------------
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 SYSTEM_PROMPT = """Eres un extractor de CLAIMS científicos en material farmacéutico.
 Tu tarea: dado el texto de UNA DIAPOSITIVA, devuelve a lo sumo N *claims* claros.
-Qué es un claim: afirmación sustantiva verificable (eficacia, seguridad, comparación con SOC, reducción de riesgo, endpoints clínicos, etc.).
+Qué es un claim: una afirmación sustantiva verificable (eficacia, seguridad, comparación con SOC, reducción de riesgo, endpoints clínicos, etc.).
 Qué NO es un claim: cifras sueltas, porcentajes, p-values, "n =", IC 95%, notas legales, referencias, DOI/PMID, fechas o metadatos.
 
 Devuelve SOLO JSON con esta forma:
@@ -53,7 +55,7 @@ Devuelve SOLO el JSON pedido (sin comentarios).
 {body}
 """
 
-# -------- Heurísticas anti "datos" --------
+# ---------------- Heurísticas anti-"datos" ----------------
 
 DATA_PATTERNS = [
     r"\b\d{1,3}\s?%\b",                  # porcentajes
@@ -61,8 +63,8 @@ DATA_PATTERNS = [
     r"\bIC\s*95%|\bCI\s*95%",            # intervalos de confianza
     r"\bn\s*=\s*\d+",                    # tamaño muestral
     r"\b(HR|OR|RR)\s*=\s*\d+(\.\d+)?",   # hazard/odds/risk ratios
-    r"\bDOI\b|\bPMID\b",                 # bibliografía
-    r"\b(Generado|Fecha|Updated)\s*:\s*\d{4}-\d{2}-\d{2}",  # metadatos slide
+    r"\bDOI\b|\bPMID\b",                 # metadatos bibliográficos
+    r"\b(Generado|Fecha|Updated)\s*:\s*\d{4}-\d{2}-\d{2}",  # metadatos de slide
 ]
 DATA_REGEX = re.compile("|".join(DATA_PATTERNS), flags=re.IGNORECASE)
 
@@ -72,7 +74,7 @@ def _is_data_like(text: str) -> bool:
         return False
     return bool(DATA_REGEX.search(t))
 
-# -------- Utils --------
+# ---------------- Utilidades ----------------
 
 def _clean_line(s: str) -> str:
     s = (s or "").strip()
@@ -89,11 +91,13 @@ def _dedupe_keep_order(items: Iterable[str]) -> List[str]:
     return out
 
 def _slide_texts(slide) -> List[str]:
+    """Extrae bloques de texto de una diapositiva."""
     lines: List[str] = []
     for shape in slide.shapes:
         if hasattr(shape, "text_frame") and getattr(shape, "has_text_frame", False):
             txt = (shape.text_frame.text or "").strip()
             if txt:
+                # trocea en líneas y limpia
                 for raw in txt.splitlines():
                     ln = _clean_line(raw)
                     if ln:
@@ -101,32 +105,32 @@ def _slide_texts(slide) -> List[str]:
     return lines
 
 def _slide_title(slide) -> str:
-    try:
-        t = slide.shapes.title
-        if t and t.has_text_frame:
-            return _clean_line(t.text_frame.text or "")
-    except Exception:
-        pass
+    if slide.shapes and getattr(slide.shapes[0], "has_text_frame", False):
+        title = (slide.shapes[0].text_frame.text or "").strip()
+        if title:
+            return _clean_line(title)
+    # fallback: primera línea larga de la slide
     for ln in _slide_texts(slide):
         if len(ln) >= 12:
             return ln
     return ""
 
-# -------- Modelo --------
+# ---------------- Modelos ----------------
 
 @dataclass
 class ClaimHit:
     slide_index: int      # 1-based
     text: str
     score: float          # [0..1]
-    debug: Dict[str, Any]
+    debug: Dict[str, Any] # trazabilidad
 
     def model_dump(self) -> Dict[str, Any]:
         return asdict(self)
 
-# -------- LLM --------
+# ---------------- LLM call ----------------
 
 def _call_llm_extract_claims(client: OpenAI, title: str, body: str, max_n: int) -> List[Dict[str, Any]]:
+    """Llama al LLM y devuelve lista de dicts {text, confidence}."""
     user_prompt = USER_PROMPT_TMPL.format(max_n=max_n, title=title or "(sin título)", body=body)
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
@@ -137,6 +141,7 @@ def _call_llm_extract_claims(client: OpenAI, title: str, body: str, max_n: int) 
         ],
     )
     raw = (resp.choices[0].message.content or "").strip()
+    # Intento de parseo robusto
     try:
         data = json.loads(raw)
         claims = data.get("claims", [])
@@ -157,21 +162,21 @@ def _call_llm_extract_claims(client: OpenAI, title: str, body: str, max_n: int) 
             out.append({"text": txt, "confidence": conf})
         return out[:max_n]
     except Exception:
-        # Fallback si llega texto plano
+        # Fallback: si no es JSON, intenta extraer líneas estilo "- ..." como claims
         lines = [ln.strip("-• ").strip() for ln in raw.splitlines() if ln.strip()]
         lines = [ln for ln in lines if len(ln) >= 8]
         lines = _dedupe_keep_order(lines)[:max_n]
         return [{"text": ln, "confidence": 0.70} for ln in lines]
 
-# -------- Público --------
+# ---------------- Público ----------------
 
-def extract_claims_from_pptx_llm(path_pptx: str,
-                                 max_claims_per_slide: int = 1,
+def extract_claims_from_pptx_llm(path_pptx: str, max_claims_per_slide: int = 1,
                                  min_confidence: float = 0.60) -> List[Dict[str, Any]]:
     """
     Procesa un PPTX con un LLM y devuelve:
       [ { "slide_index": 1, "text": "...", "score": 0.82, "debug": {...} }, ... ]
     """
+    # Carga
     with open(path_pptx, "rb") as f:
         data = io.BytesIO(f.read())
     pres = Presentation(data)
@@ -180,13 +185,13 @@ def extract_claims_from_pptx_llm(path_pptx: str,
 
     hits: List[ClaimHit] = []
 
-    for idx, slide in enumerate(pres.slides, start=1):
+    for idx, slide in enumerate(pres.slides, start=1):   # 1-based
         title = _slide_title(slide)
         lines = _slide_texts(slide)
         if not lines:
             continue
 
-        # Pre-filtrado local de ruido "de datos"
+        # Pre-filtrado local: quita claramente "datos" antes de enviar al LLM
         body_lines = [ln for ln in lines if not _is_data_like(ln)]
         if not body_lines:
             continue
@@ -199,15 +204,18 @@ def extract_claims_from_pptx_llm(path_pptx: str,
             cand = it.get("text", "").strip()
             if not cand:
                 continue
+            # doble compuerta: anti-datos + confianza
             if _is_data_like(cand):
                 continue
             score = float(it.get("confidence", 0.0))
             if score < min_confidence:
                 continue
 
+            # normaliza texto
+            text_final = _clean_line(cand)
             hit = ClaimHit(
                 slide_index=idx,
-                text=_clean_line(cand),
+                text=text_final,
                 score=score,
                 debug={
                     "title": title,
@@ -227,5 +235,8 @@ def extract_claims_from_pptx_llm(path_pptx: str,
             key.add(k)
             unique.append(h)
 
+    # Ordena por slide y score desc
     unique.sort(key=lambda h: (h.slide_index, -h.score))
+
+    # Convierte a dict para retorno público
     return [h.model_dump() for h in unique]

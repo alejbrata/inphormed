@@ -1,4 +1,9 @@
 # -*- coding: utf-8 -*-
+"""
+Puerta única para extraer claims desde PPTX con IA generativa.
+(No toca utils/ref_extractor.py, que es para referencias.)
+"""
+
 from typing import List, Dict, Any
 from app.agents.claims.llm_claim_extractor import extract_claims_from_pptx_llm
 
