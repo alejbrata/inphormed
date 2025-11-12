@@ -1,80 +1,33 @@
-# app/api/claims.py — endpoint estable para validar claims por texto (web-first + LLM)
 from __future__ import annotations
+from fastapi import APIRouter, Query
+from typing import Optional
 
-import hashlib
-import os
-from typing import Any, Dict, List, Optional
-
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
-
-from app.services.claim_validator import ClaimValidatorService
+from app.domain.core_models import Claim, SlideContext
+from app.llm.judge import LLMJudge
+from app.agents.sources.registry import get_default_fuentes
+from app.agents.orchestrator.llm_first import orchestrate_llm_first
 
 router = APIRouter(prefix="/api/claims", tags=["claims"])
 
+@router.get("/validate", summary="Valida un claim contra PubMed (LLM-first)")
+async def validate_claim_llm_first(
+    claim_text: str = Query(..., description="Texto del claim"),
+    slide_title: Optional[str] = Query("", description="Título de la slide"),
+    slide_excerpt: Optional[str] = Query("", description="Extracto visible"),
+    topk: int = Query(5, ge=1, le=10),
+    mock_llm: bool = Query(False, description="Usa juez simulado para pruebas")
+):
+    claim = Claim(text=claim_text)
+    slide = SlideContext(title=slide_title or "", excerpt=slide_excerpt or "")
 
-# ─────────────────────────────────────────────────────────────
-# Esquemas de E/S (Pydantic)
-# ─────────────────────────────────────────────────────────────
-class ClaimHit(BaseModel):
-    source: Optional[str] = None
-    pmid: Optional[str] = None
-    doi: Optional[str] = None
-    url: Optional[str] = None
-    title: Optional[str] = None
-    text: Optional[str] = None
-    year: Optional[str] = None
-    score: float = 0.0
+    fuentes = get_default_fuentes()
+    judge = LLMJudge(mock=mock_llm)
 
-
-class ValidateTextRequest(BaseModel):
-    text: str = Field(..., min_length=5, description="Claim a validar")
-    topk: int = Field(default=int(os.getenv("RAG_TOPK", "8")), ge=1, le=20)
-    thr_green: float = Field(default=float(os.getenv("RAG_THR_GREEN", "0.82")))
-    thr_yellow: float = Field(default=float(os.getenv("RAG_THR_YELLOW", "0.70")))
-
-
-class ValidateTextResponse(BaseModel):
-    where: str = "text"
-    text: str
-    claim_id: str
-    status: str
-    best_score: float
-    hits: List[ClaimHit]
-
-
-# ─────────────────────────────────────────────────────────────
-# DI simple para el servicio
-# ─────────────────────────────────────────────────────────────
-def get_validator() -> ClaimValidatorService:
-    return ClaimValidatorService(
-        evidence=None,  # web-first (PubMed, EuropePMC, Crossref)
-        topk=int(os.getenv("RAG_TOPK", "8")),
-        thr_green=float(os.getenv("RAG_THR_GREEN", "0.82")),
-        thr_yellow=float(os.getenv("RAG_THR_YELLOW", "0.70")),
+    result = await orchestrate_llm_first(
+        claim=claim,
+        slide_ctx=slide,
+        sources=fuentes,
+        llm_judge=judge,
+        topk=topk,
     )
-
-
-# ─────────────────────────────────────────────────────────────
-# Endpoint
-# ─────────────────────────────────────────────────────────────
-@router.post("/validate-text", response_model=ValidateTextResponse)
-def validate_text(req: ValidateTextRequest, validator: ClaimValidatorService = Depends(get_validator)):
-    # Permite ajustar por-request
-    validator.topk = req.topk
-    validator.thr_green = req.thr_green
-    validator.thr_yellow = req.thr_yellow
-
-    res: Dict[str, Any] = validator.validate(req.text)
-
-    claim_id = hashlib.sha256(req.text.encode("utf-8")).hexdigest()[:16]
-    hits_models = [ClaimHit(**h) for h in (res.get("hits") or [])]
-
-    return ValidateTextResponse(
-        where="text",
-        text=req.text,
-        claim_id=claim_id,
-        status=res.get("status", "red"),
-        best_score=float(res.get("best_score", 0.0)),
-        hits=hits_models,
-    )
+    return result

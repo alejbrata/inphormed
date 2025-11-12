@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+from io import BytesIO
 from typing import List, Dict, Tuple
 
 from pptx import Presentation
@@ -93,8 +94,11 @@ def annotate_pptx(original_path: str, out_path: str, findings: List[Dict]) -> st
                                     hlink.address = url
                                 except Exception:
                                     pass
-    prs.save(out_path)
-    return out_path
+    out_buf = BytesIO()          # ⬅️ buffer en memoria, no una lista
+    prs.save(out_buf)            # ⬅️ guarda el PPTX dentro del buffer
+    out_bytes = out_buf.getvalue()
+    return out_bytes  
+  
 
 def _weak_match(text: str, claim: str) -> bool:
     # match ligero: comparte ≥3 palabras de 6+ letras

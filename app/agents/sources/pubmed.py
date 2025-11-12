@@ -1,68 +1,127 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import List, Dict, Any
-from datetime import datetime
-import os, requests, urllib.parse, xml.etree.ElementTree as ET
+from typing import List, Optional
+import os, re
+import httpx
+from app.domain.core_models import Claim, CandidateDoc
+from .base import BaseSourceAgent
 
-from .base import AgenteFuente
+ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-NCBI_EMAIL = os.getenv("NCBI_EMAIL", "")
-NCBI_API_KEY = os.getenv("NCBI_API_KEY", "")
+NCBI_API_KEY = os.getenv("NCBI_API_KEY")  # opcional
 
-def _params(extra: Dict[str,str]) -> Dict[str,str]:
-    p = {"tool": "inphormed"}
-    if NCBI_EMAIL: p["email"] = NCBI_EMAIL
-    if NCBI_API_KEY: p["api_key"] = NCBI_API_KEY
-    p.update(extra)
-    return p
+def _q_title_exact(title: str) -> str:
+    t = title.replace('"', '')
+    return f"\"{t}\"[Title]"
 
-def _mk_url_from_pmid(pmid: str | None) -> str:
-    return f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
+def _q_title_keywords(text: str, extra: Optional[str] = None) -> str:
+    # recorta stopwords y deja tokens informativos
+    words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\-]{3,}", text)
+    core = " ".join(words[:12])
+    q = f"({core})[Title/Abstract]"
+    if extra:
+        q += f" AND ({extra})"
+    return q
 
-def search(query: str, page_size: int = 8, timeout: float = 15.0) -> List[Dict[str, Any]]:
-    q = urllib.parse.quote_plus(query)
-    # 1) ESearch
-    r = requests.get(f"{EUTILS}/esearch.fcgi",
-                     params=_params({"db":"pubmed","retmode":"json","retmax":str(page_size),"term":q}),
-                     timeout=timeout)
-    r.raise_for_status()
-    ids = (r.json().get("esearchresult", {}).get("idlist", []) or [])[:page_size]
-    if not ids:
-        return []
-
-    # 2) EFetch
-    r2 = requests.get(f"{EUTILS}/efetch.fcgi",
-                      params=_params({"db":"pubmed","retmode":"xml","id":",".join(ids)}),
-                      timeout=timeout)
-    r2.raise_for_status()
-
-    out: List[Dict[str, Any]] = []
-    root = ET.fromstring(r2.text)
-    for art in root.findall(".//PubmedArticle"):
-        pmid = (art.findtext(".//PMID") or "").strip() or None
-        title = (art.findtext(".//ArticleTitle") or "").strip()
-        abs_nodes = art.findall(".//Abstract/AbstractText")
-        abstract = " ".join([(t.text or "").strip() for t in abs_nodes if (t.text or "").strip()])
-        doi = None
-        for idnode in art.findall(".//ArticleIdList/ArticleId"):
-            if (idnode.get("IdType") or "").lower() == "doi":
-                doi = (idnode.text or "").strip()
-                break
-        out.append({
-            "source": "pubmed",
-            "pmid": pmid,
-            "doi": doi,
-            "url": (f"https://doi.org/{doi}" if doi else _mk_url_from_pmid(pmid)),
-            "title": title,
-            "abstract": abstract,
-            "year": art.findtext(".//Journal/JournalIssue/PubDate/Year"),
-            "journal": art.findtext(".//Journal/Title"),
-        })
-    return out
-
-class AgentePubMed(AgenteFuente):
+class AgentePubMed(BaseSourceAgent):
     name = "pubmed"
-    timeout_default = 15.0
-    def buscar(self, claim: str, deadline: datetime):
-        return None
+    timeout_default = 8.0
+
+    def __init__(self, session: Optional[httpx.AsyncClient] = None):
+        self._session = session
+
+    async def fetch_candidates(self, claim: Claim, limit: int = 5) -> List[CandidateDoc]:
+        # heurística: primera línea del claim como título probable
+        title_guess = (claim.text or "").split("\n")[0][:220]
+        extra = "hidradenitis suppurativa[Title/Abstract] OR hidradenitis supurativa[Title/Abstract]"
+        queries = [
+            _q_title_exact(title_guess),
+            _q_title_keywords(title_guess, extra=extra),
+            _q_title_keywords(claim.text, extra=extra),
+        ]
+
+        pmids: List[str] = []
+        async with (self._session or httpx.AsyncClient(timeout=10.0)) as client:
+            for q in queries:
+                ids = await self._esearch(client, q, retmax=limit)
+                for pmid in ids:
+                    if pmid not in pmids:
+                        pmids.append(pmid)
+                if len(pmids) >= limit:
+                    break
+
+            if not pmids:
+                return []
+
+            summaries = await self._esummary(client, pmids)
+            abstracts = await self._efetch_abstracts(client, pmids)
+
+        cands: List[CandidateDoc] = []
+        for pmid in pmids[:limit]:
+            meta = summaries.get(pmid, {})
+            title = meta.get("Title") or meta.get("title") or ""
+            authors = [a.get("Name") or a.get("name") for a in meta.get("Authors", []) if a]
+            journal = meta.get("FullJournalName") or meta.get("Source")
+            year = None
+            try:
+                year = int((meta.get("PubDate") or "").split()[0])
+            except Exception:
+                pass
+            url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            abstract_text = abstracts.get(pmid, "")
+            snippet = abstract_text[:2000]
+            cands.append(CandidateDoc(
+                source="pubmed",
+                id=pmid,
+                title=title,
+                authors=authors,
+                journal=journal,
+                year=year,
+                url=url,
+                abstract_snippets=snippet,
+                fulltext_snippets="",
+            ))
+        return cands
+
+    async def _esearch(self, client: httpx.AsyncClient, query: str, retmax: int = 10) -> List[str]:
+        params = {"db": "pubmed", "retmode": "json", "sort": "bestmatch", "retmax": retmax, "term": query}
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+        r = await client.get(ESEARCH_URL, params=params)
+        r.raise_for_status()
+        js = r.json()
+        return js.get("esearchresult", {}).get("idlist", []) or []
+
+    async def _esummary(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
+        params = {"db": "pubmed", "retmode": "json", "id": ",".join(pmids)}
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+        r = await client.get(ESUMMARY_URL, params=params)
+        r.raise_for_status()
+        js = r.json()
+        res = js.get("result", {})
+        res.pop("uids", None)
+        return res
+
+    async def _efetch_abstracts(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
+        params = {"db": "pubmed", "retmode": "xml", "id": ",".join(pmids)}
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+        r = await client.get(EFETCH_URL, params=params)
+        r.raise_for_status()
+        xml = r.text
+        abstracts: dict = {}
+        try:
+            articles = re.findall(r"<PubmedArticle>(.*?)</PubmedArticle>", xml, flags=re.S)
+            for art in articles:
+                pmid_match = re.search(r"<PMID[^>]*>(\d+)</PMID>", art)
+                pmid = pmid_match.group(1) if pmid_match else None
+                if not pmid:
+                    continue
+                parts = re.findall(r"<AbstractText[^>]*>(.*?)</AbstractText>", art, flags=re.S)
+                text = " ".join(re.sub(r"<[^>]+>", "", p).strip() for p in parts if p).strip()
+                abstracts[pmid] = text
+        except Exception:
+            pass
+        return abstracts
