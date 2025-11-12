@@ -10,13 +10,12 @@ from app.domain.core_models import (
 from app.llm.judge import LLMJudge
 from app.agents.sources.base import BaseSourceAgent
 
-LLM_MIN_CANCEL = 0.92        # subimos el umbral para evitar cortar temprano
+LLM_MIN_CANCEL = 0.92
 LLM_PATIENCE_MS = 1200
 GLOBAL_DEADLINE_S = 8.0
 TOPK_RETURN = 5
 
 # --- ¡CAMBIO REALIZADO AQUÍ! ---
-# La firma ahora incluye SlideContext
 async def _gather_from_sources(
     sources: List[BaseSourceAgent], 
     claim: Claim, 
@@ -28,7 +27,6 @@ async def _gather_from_sources(
         try:
             start = time.time()
             # --- ¡CAMBIO REALIZADO AQUÍ! ---
-            # Pasamos el slide_ctx al agente
             cands = await agent.fetch_candidates(claim, slide_ctx, limit=limit)
             elapsed = (time.time() - start) * 1000
             for c in cands:
@@ -55,7 +53,6 @@ async def orchestrate_llm_first(
     fetch_start = time.time()
     
     # --- ¡CAMBIO REALIZADO AQUÍ! ---
-    # Pasamos el slide_ctx al _gather_from_sources
     candidates = await _gather_from_sources(sources, claim, slide_ctx, limit=max(2, topk * 2))
     fetch_ms = (time.time() - fetch_start) * 1000
 
@@ -83,11 +80,10 @@ async def orchestrate_llm_first(
             canceled_early = True
             break
 
-    # si hubo pocos candidatos, intenta evaluar el resto
     idx = len(judged_heap)
     while idx < len(candidates) and idx < topk and time.time() < global_deadline:
         cand = candidates[idx]
-        idx += 1 # <-- Mover esto aquí para evitar bucle infinito si decide() falla
+        idx += 1
         jr = llm_judge.decide(claim, slide_ctx, cand)
         cand.llm_judgement = jr
         cand.score = jr.score
@@ -95,6 +91,7 @@ async def orchestrate_llm_first(
         heapq.heappush(judged_heap, (-cand.score, cand))
         if best is None or cand.score > (best.score or 0.0):
             best = cand
+        idx += 1
 
     ranked: List[RankedItem] = []
     k = 0
@@ -108,7 +105,7 @@ async def orchestrate_llm_first(
             id=cand.id,
             title=cand.title,
             score=float(jr.score if jr else cand.score or 0.0),
-            verdict=(jr.verdict if jr else (cand.verdict or "insufficient")),  # type: ignore
+            verdict=(jr.verdict if jr else (cand.verdict or "insufficient")),
             why_short=(jr.why_short if jr else ""),
             url=cand.url,
             year=cand.year,

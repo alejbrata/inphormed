@@ -11,17 +11,15 @@ ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-NCBI_API_KEY = os.getenv("NCBI_API_KEY")  # opcional
+NCBI_API_KEY = os.getenv("NCBI_API_KEY")
 
 def _q_title_exact(title: str) -> str:
     t = title.replace('"', '')
     return f"\"{t}\"[Title]"
 
 def _q_title_keywords(text: str, extra: Optional[str] = None) -> str:
-    # recorta stopwords y deja tokens informativos
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\-]{3,}", text)
     # --- ¡CAMBIO REALIZADO AQUÍ! ---
-    # Aumentado el número de palabras para citas más largas
     core = " ".join(words[:25]) 
     q = f"({core})[Title/Abstract]"
     if extra:
@@ -36,7 +34,6 @@ class AgentePubMed(BaseSourceAgent):
         self._session = session
 
     # --- ¡CAMBIO REALIZADO AQUÍ! ---
-    # Firma actualizada
     async def fetch_candidates(
         self, 
         claim: Claim, 
@@ -47,13 +44,11 @@ class AgentePubMed(BaseSourceAgent):
         # --- ¡LÓGICA DE BÚSQUEDA MEJORADA! ---
         
         # 1. ¿Nos ha pasado el extractor el texto de la cita?
-        # (El texto de la cita es el "slide_body_preview")
         citation_query = getattr(slide_ctx, "citation_string", None)
         extra = "hidradenitis suppurativa[Title/Abstract] OR hidradenitis supurativa[Title/Abstract]"
 
         if citation_query and len(citation_query) > 10:
             # ¡SÍ! Usar el texto de la cita (autores, año) como query principal.
-            # Esto es mucho más preciso.
             queries = [
                 _q_title_keywords(citation_query, extra=extra)
             ]
@@ -121,7 +116,6 @@ class AgentePubMed(BaseSourceAgent):
             js = r.json()
             return js.get("esearchresult", {}).get("idlist", []) or []
         except Exception:
-            # No fallar ruidosamente si PubMed da error
             return []
 
     async def _esummary(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:

@@ -10,12 +10,10 @@ class AgenteEuropePMC(BaseSourceAgent):
     timeout_default = 6.0
 
     # --- ¡CAMBIO REALIZADO AQUÍ! ---
-    # Actualizada la firma para que coincida con la clase base
     async def fetch_candidates(
         self, 
         claim: Claim, 
         slide_ctx: SlideContext, 
         limit: int = 3
     ) -> List[CandidateDoc]:
-        # Stub: devuelve vacío por defecto hasta implementarlo.
         return []

@@ -1,3 +1,4 @@
+# app/domain/core_models.py
 from __future__ import annotations
 from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field
@@ -37,20 +38,21 @@ class Claim(BaseModel):
 class SlideContext(BaseModel):
     title: str = ""
     excerpt: str = ""
+    # --- ¡CAMBIO REALIZADO AQUÍ! ---
+    citation_string: Optional[str] = None 
 
 class CandidateDoc(BaseModel):
-    source: str                  # "pubmed", "epmc", ...
-    id: str                      # pmid / doi / url
+    source: str
+    id: str
     title: str
     authors: List[str] = []
     journal: Optional[str] = None
     year: Optional[int] = None
     url: Optional[str] = None
-    abstract_snippets: str = ""      # texto recortado para el juez
-    fulltext_snippets: str = ""      # opcional
+    abstract_snippets: str = ""
+    fulltext_snippets: str = ""
     latency_ms: Optional[int] = None
 
-    # Rellenados por el juez LLM:
     score: Optional[float] = None
     verdict: Optional[Literal["supports", "refutes", "insufficient"]] = None
     llm_judgement: Optional[JudgeResult] = None
