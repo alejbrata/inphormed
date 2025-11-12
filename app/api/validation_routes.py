@@ -9,7 +9,8 @@ import base64
 import tempfile
 import os
 import shutil
-import re # <-- Importar regex
+import re
+import json # <-- Importar JSON
 
 # Importar el parser de PPTX
 try:
@@ -18,9 +19,15 @@ except ImportError:
     print("ERROR: 'python-pptx' no está instalado. Ejecuta: pip install python-pptx")
     Presentation = None
 
+# --- ¡NUEVO! Importar cliente de OpenAI ---
+try:
+    from openai import OpenAI
+except ImportError:
+    print("ERROR: 'openai' no está instalado. Ejecuta: pip install openai")
+    OpenAI = None
+
 # Imports de tu lógica de TFM (Arquitectura 3)
-from app.utils.claim_extractor import extract_claims_with_debug # (Ya no se usa, pero lo dejamos por si acaso)
-from app.domain.core_models import Claim, SlideContext # <-- Usando el modelo modificado
+from app.domain.core_models import Claim, SlideContext
 from app.llm.judge import LLMJudge
 from app.agents.sources.registry import get_default_fuentes
 from app.agents.orchestrator.llm_first import orchestrate_llm_first
@@ -30,53 +37,72 @@ from app.services.annotate_service import annotate_pptx, write_snippets_html
 router = APIRouter(prefix="/api/claims", tags=["claims"])
 
 
-# --- ¡NUEVO PARSER BASADO EN REGLAS! ---
-# Este parser reemplaza a llm_claim_extractor
-# y entiende el formato "CLAIM:" / "Datos del claim:"
-def _parse_demo_pptx(pptx_bytes: bytes) -> List[Dict[str, Any]]:
+# --- ¡NUEVO PARSER BASADO EN LLM! ---
+# Este es el "Efecto Wow". Reemplaza el regex.
+
+EXTRACTOR_SYSTEM_PROMPT = """
+Eres un asistente de IA para análisis de documentos farmacéuticos.
+Tu tarea es analizar el texto de una DIAPOSITIVA de PowerPoint y extraer los "pares de validación".
+Un "par de validación" consiste en:
+1. El "claim" (la afirmación principal de eficacia, seguridad, etc.).
+2. La "cita" (el texto de la referencia bibliográfica, ej: "Kimball AB, et al...").
+
+Busca patrones como "Claim X..." y "Cita (Vancouver):...".
+Ignora texto de "Notas:", portadas, o títulos de sección.
+
+Devuelve SÓLO un objeto JSON con la clave "pairs", así:
+{
+  "pairs": [
+    {
+      "claim_text": "El texto del claim 1...",
+      "citation_text": "El texto de la cita 1..."
+    }
+  ]
+}
+Si no hay pares, devuelve {"pairs": []}.
+"""
+
+def _get_openai_client() -> Optional[OpenAI]:
+    """Crea un cliente de OpenAI. Reutiliza la lógica de tu app."""
+    if OpenAI is None:
+        return None
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("ADVERTENCIA: OPENAI_API_KEY no encontrada. El extractor LLM fallará.")
+        return None
+    
+    # (Si usas Azure, puedes añadir la lógica de 'judge.py' aquí)
+    return OpenAI(api_key=api_key)
+
+def _extract_pairs_with_llm(slide_text: str, slide_index: int, client: OpenAI) -> List[Dict[str, Any]]:
     """
-    Parser simple y robusto para el formato de tu PPTX de demo.
-    Extrae (claim_text, citation_text, slide_index)
+    Usa un LLM (gpt-4o-mini) para extraer pares (claim, cita) del texto de una slide.
     """
-    if Presentation is None:
-        raise HTTPException(status_code=500, detail="Dependencia 'python-pptx' no encontrada.")
+    if not client:
+        return []
+
+    try:
+        resp = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), # Usar un modelo rápido
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Texto de la Diapositiva {slide_index}:\n\n---\n{slide_text}\n---"}
+            ]
+        )
+        raw_json = resp.choices[0].message.content
+        data = json.loads(raw_json)
+        pairs = data.get("pairs", [])
         
-    from io import BytesIO
-    prs = Presentation(BytesIO(pptx_bytes))
+        # Añadir el índice de la slide para trazabilidad
+        for p in pairs:
+            p["slide_index"] = slide_index
+        return pairs
     
-    extracted_items = []
-    
-    for i, slide in enumerate(prs.slides, start=1):
-        if i == 1: continue # Ignorar portada
-
-        slide_text = ""
-        for shape in slide.shapes:
-            if hasattr(shape, "text_frame") and shape.text_frame:
-                slide_text += shape.text_frame.text + "\n"
-
-        # Usar regex para encontrar los bloques
-        claim_match = re.search(r"CLAIM:\s*([\s\S]+?)(Datos del claim:|Cura definitiva|$)", slide_text, re.IGNORECASE)
-        data_match = re.search(r"Datos del claim:\s*([\s\S]+)", slide_text, re.IGNORECASE)
-
-        if claim_match:
-            claim_text = claim_match.group(1).strip().replace("\n", " ")
-            citation_text = ""
-            if data_match:
-                citation_text = data_match.group(1).strip()
-            
-            # Caso especial de la última slide (no tiene "Datos del claim")
-            if "Cura definitiva" in slide_text and not data_match:
-                # Tomamos el texto de la cita de la slide anterior si es necesario
-                # o lo dejamos vacío (lo que hará que falle, que es lo esperado)
-                citation_text = "" # Es un claim inventado, no tiene datos
-
-            extracted_items.append({
-                "slide_index": i,
-                "claim_text": claim_text,
-                "citation_string": citation_text,
-            })
-            
-    return extracted_items
+    except Exception as e:
+        print(f"Error en LLM Extractor (Slide {slide_index}): {e}")
+        return []
 
 
 @router.post("/validate-ppt", summary="Valida un PPTX con claims (LLM-first)")
@@ -95,7 +121,7 @@ async def validate_pptx_llm_first(
 ):
     """
     Endpoint principal para validar un PPTX.
-    1. Extrae (claim, cita) usando el parser de reglas (_parse_demo_pptx).
+    1. Extrae (claim, cita) usando el PARSER LLM.
     2. Pasa el claim + cita al orquestador (llm_first).
     3. El orquestador usa el AgentePubMed (modificado) para buscar por cita.
     4. El LLMJudge puntúa el paper encontrado.
@@ -128,12 +154,38 @@ async def validate_pptx_llm_first(
             tmp.write(raw)
 
         # --- ¡CAMBIO CRÍTICO! ---
-        # 1. Extracción (usando el NUEVO parser de reglas)
-        items = _parse_demo_pptx(raw)
+        # 1. Extracción (usando el NUEVO extractor LLM)
+        if Presentation is None:
+            raise HTTPException(status_code=500, detail="Dependencia 'python-pptx' no encontrada.")
+        
+        llm_client = _get_openai_client()
+        if llm_client is None:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY no configurada para el extractor.")
+
+        from io import BytesIO
+        prs = Presentation(BytesIO(raw))
+        items = []
+
+        for i, slide in enumerate(prs.slides, start=1):
+            if i == 1: continue # Ignorar portada
+            
+            slide_text = ""
+            for shape in slide.shapes:
+                if hasattr(shape, "text_frame") and shape.text_frame:
+                    slide_text += shape.text_frame.text + "\n"
+            
+            # Solo llamamos al LLM si la slide tiene texto
+            slide_text = slide_text.strip()
+            if len(slide_text) > 50: 
+                pairs_from_slide = _extract_pairs_with_llm(slide_text, i, llm_client)
+                items.extend(pairs_from_slide)
         # --- FIN DEL CAMBIO ---
         
         if not items:
-            return JSONResponse({"file_name": file_name, "total_claims": 0, "results": []})
+            return JSONResponse(
+                {"file_name": file_name, "total_claims": 0, "results": [], "error": "El LLM no detectó pares de claim/cita válidos."},
+                status_code=400
+            )
 
         fuentes = get_default_fuentes()
         judge = LLMJudge(mock=mock_llm)
@@ -144,7 +196,7 @@ async def validate_pptx_llm_first(
         for it in items:
             slide_idx = it["slide_index"]
             claim_text = it["claim_text"]
-            citation_context = it["citation_string"] # <-- El texto de la cita
+            citation_context = it["citation_text"] # <-- El LLM ya nos lo da separado
             
             # 2. Preparación del Contexto
             claim = Claim(text=claim_text)
