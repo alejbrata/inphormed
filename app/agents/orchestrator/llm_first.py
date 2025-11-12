@@ -1,3 +1,4 @@
+# app/agents/orchestrator/llm_first.py
 from __future__ import annotations
 import time, heapq, asyncio
 from typing import List, Tuple
@@ -14,11 +15,21 @@ LLM_PATIENCE_MS = 1200
 GLOBAL_DEADLINE_S = 8.0
 TOPK_RETURN = 5
 
-async def _gather_from_sources(sources: List[BaseSourceAgent], claim: Claim, limit: int) -> List[CandidateDoc]:
+# --- ¡CAMBIO REALIZADO AQUÍ! ---
+# La firma ahora incluye SlideContext
+async def _gather_from_sources(
+    sources: List[BaseSourceAgent], 
+    claim: Claim, 
+    slide_ctx: SlideContext, 
+    limit: int
+) -> List[CandidateDoc]:
+    
     async def run_agent(agent: BaseSourceAgent):
         try:
             start = time.time()
-            cands = await agent.fetch_candidates(claim, limit=limit)
+            # --- ¡CAMBIO REALIZADO AQUÍ! ---
+            # Pasamos el slide_ctx al agente
+            cands = await agent.fetch_candidates(claim, slide_ctx, limit=limit)
             elapsed = (time.time() - start) * 1000
             for c in cands:
                 c.latency_ms = int(elapsed)
@@ -42,7 +53,10 @@ async def orchestrate_llm_first(
 ) -> OrchestratorResult:
     t0 = time.time()
     fetch_start = time.time()
-    candidates = await _gather_from_sources(sources, claim, limit=max(2, topk * 2))
+    
+    # --- ¡CAMBIO REALIZADO AQUÍ! ---
+    # Pasamos el slide_ctx al _gather_from_sources
+    candidates = await _gather_from_sources(sources, claim, slide_ctx, limit=max(2, topk * 2))
     fetch_ms = (time.time() - fetch_start) * 1000
 
     judged_heap: List[Tuple[float, CandidateDoc]] = []
@@ -73,6 +87,7 @@ async def orchestrate_llm_first(
     idx = len(judged_heap)
     while idx < len(candidates) and idx < topk and time.time() < global_deadline:
         cand = candidates[idx]
+        idx += 1 # <-- Mover esto aquí para evitar bucle infinito si decide() falla
         jr = llm_judge.decide(claim, slide_ctx, cand)
         cand.llm_judgement = jr
         cand.score = jr.score
@@ -80,7 +95,6 @@ async def orchestrate_llm_first(
         heapq.heappush(judged_heap, (-cand.score, cand))
         if best is None or cand.score > (best.score or 0.0):
             best = cand
-        idx += 1
 
     ranked: List[RankedItem] = []
     k = 0

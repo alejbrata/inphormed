@@ -1,8 +1,10 @@
+# app/agents/sources/pubmed.py
 from __future__ import annotations
 from typing import List, Optional
 import os, re
 import httpx
-from app.domain.core_models import Claim, CandidateDoc
+# --- ¡CAMBIO REALIZADO AQUÍ! ---
+from app.domain.core_models import Claim, CandidateDoc, SlideContext
 from .base import BaseSourceAgent
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -18,7 +20,9 @@ def _q_title_exact(title: str) -> str:
 def _q_title_keywords(text: str, extra: Optional[str] = None) -> str:
     # recorta stopwords y deja tokens informativos
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\-]{3,}", text)
-    core = " ".join(words[:12])
+    # --- ¡CAMBIO REALIZADO AQUÍ! ---
+    # Aumentado el número de palabras para citas más largas
+    core = " ".join(words[:25]) 
     q = f"({core})[Title/Abstract]"
     if extra:
         q += f" AND ({extra})"
@@ -31,15 +35,38 @@ class AgentePubMed(BaseSourceAgent):
     def __init__(self, session: Optional[httpx.AsyncClient] = None):
         self._session = session
 
-    async def fetch_candidates(self, claim: Claim, limit: int = 5) -> List[CandidateDoc]:
-        # heurística: primera línea del claim como título probable
-        title_guess = (claim.text or "").split("\n")[0][:220]
+    # --- ¡CAMBIO REALIZADO AQUÍ! ---
+    # Firma actualizada
+    async def fetch_candidates(
+        self, 
+        claim: Claim, 
+        slide_ctx: SlideContext, 
+        limit: int = 5
+    ) -> List[CandidateDoc]:
+        
+        # --- ¡LÓGICA DE BÚSQUEDA MEJORADA! ---
+        
+        # 1. ¿Nos ha pasado el extractor el texto de la cita?
+        # (El texto de la cita es el "slide_body_preview")
+        citation_query = getattr(slide_ctx, "citation_string", None)
         extra = "hidradenitis suppurativa[Title/Abstract] OR hidradenitis supurativa[Title/Abstract]"
-        queries = [
-            _q_title_exact(title_guess),
-            _q_title_keywords(title_guess, extra=extra),
-            _q_title_keywords(claim.text, extra=extra),
-        ]
+
+        if citation_query and len(citation_query) > 10:
+            # ¡SÍ! Usar el texto de la cita (autores, año) como query principal.
+            # Esto es mucho más preciso.
+            queries = [
+                _q_title_keywords(citation_query, extra=extra)
+            ]
+        else:
+            # NO. Volver al método antiguo: usar el texto del claim
+            title_guess = (claim.text or "").split("\n")[0][:220]
+            queries = [
+                _q_title_exact(title_guess),
+                _q_title_keywords(title_guess, extra=extra),
+                _q_title_keywords(claim.text, extra=extra),
+            ]
+        # --- FIN DE LA LÓGICA DE BÚSQUEDA ---
+
 
         pmids: List[str] = []
         async with (self._session or httpx.AsyncClient(timeout=10.0)) as client:
@@ -88,31 +115,39 @@ class AgentePubMed(BaseSourceAgent):
         params = {"db": "pubmed", "retmode": "json", "sort": "bestmatch", "retmax": retmax, "term": query}
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
-        r = await client.get(ESEARCH_URL, params=params)
-        r.raise_for_status()
-        js = r.json()
-        return js.get("esearchresult", {}).get("idlist", []) or []
+        try:
+            r = await client.get(ESEARCH_URL, params=params)
+            r.raise_for_status()
+            js = r.json()
+            return js.get("esearchresult", {}).get("idlist", []) or []
+        except Exception:
+            # No fallar ruidosamente si PubMed da error
+            return []
 
     async def _esummary(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
         params = {"db": "pubmed", "retmode": "json", "id": ",".join(pmids)}
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
-        r = await client.get(ESUMMARY_URL, params=params)
-        r.raise_for_status()
-        js = r.json()
-        res = js.get("result", {})
-        res.pop("uids", None)
-        return res
+        try:
+            r = await client.get(ESUMMARY_URL, params=params)
+            r.raise_for_status()
+            js = r.json()
+            res = js.get("result", {})
+            res.pop("uids", None)
+            return res
+        except Exception:
+            return {}
 
     async def _efetch_abstracts(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
         params = {"db": "pubmed", "retmode": "xml", "id": ",".join(pmids)}
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
-        r = await client.get(EFETCH_URL, params=params)
-        r.raise_for_status()
-        xml = r.text
-        abstracts: dict = {}
         try:
+            r = await client.get(EFETCH_URL, params=params)
+            r.raise_for_status()
+            xml = r.text
+            abstracts: dict = {}
+        
             articles = re.findall(r"<PubmedArticle>(.*?)</PubmedArticle>", xml, flags=re.S)
             for art in articles:
                 pmid_match = re.search(r"<PMID[^>]*>(\d+)</PMID>", art)
@@ -122,6 +157,6 @@ class AgentePubMed(BaseSourceAgent):
                 parts = re.findall(r"<AbstractText[^>]*>(.*?)</AbstractText>", art, flags=re.S)
                 text = " ".join(re.sub(r"<[^>]+>", "", p).strip() for p in parts if p).strip()
                 abstracts[pmid] = text
+            return abstracts
         except Exception:
-            pass
-        return abstracts
+            return {}

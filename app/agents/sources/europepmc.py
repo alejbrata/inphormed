@@ -1,12 +1,21 @@
+# app/agents/sources/europepmc.py
 from __future__ import annotations
 from typing import List
-from app.models.core import Claim, CandidateDoc
+# --- ¡CAMBIO REALIZADO AQUÍ! ---
+from app.domain.core_models import Claim, CandidateDoc, SlideContext
 from .base import BaseSourceAgent
 
 class AgenteEuropePMC(BaseSourceAgent):
     name = "epmc"
     timeout_default = 6.0
 
-    async def fetch_candidates(self, claim: Claim, limit: int = 3) -> List[CandidateDoc]:
+    # --- ¡CAMBIO REALIZADO AQUÍ! ---
+    # Actualizada la firma para que coincida con la clase base
+    async def fetch_candidates(
+        self, 
+        claim: Claim, 
+        slide_ctx: SlideContext, 
+        limit: int = 3
+    ) -> List[CandidateDoc]:
         # Stub: devuelve vacío por defecto hasta implementarlo.
         return []
