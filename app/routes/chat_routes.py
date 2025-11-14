@@ -1,7 +1,10 @@
+# app/routes/chat_routes.py
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List, Literal, Optional, Dict, Any
-from app.services.llm_service import LLMService
+
+# --- ¡CAMBIO! Importamos nuestro servicio ---
+from app.services.llm_service import LLMService, LLMServiceError
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -15,7 +18,20 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat")
 def chat(req: ChatRequest) -> Dict[str, Any]:
-    llm = LLMService()
-    # Intenta responder con LLM si hay API key. Si falla, usa fallback.
-    reply = llm.chat(topic=req.topic, messages=[m.model_dump() for m in req.messages])
-    return {"reply": reply}
+    
+    # --- ¡CAMBIO! ---
+    # Toda la lógica de 'openai' desaparece
+    try:
+        llm = LLMService(temperature=0.3) # Temperatura específica para chat
+        
+        reply = llm.chat(
+            topic=req.topic, 
+            messages=[m.model_dump() for m in req.messages]
+        )
+        
+        return {"reply": reply}
+
+    except (LLMServiceError, Exception) as e:
+        # Devolvemos el error al frontend para que el usuario sepa qué pasa
+        return {"reply": f"Error en el servicio LLM: {e}"}
+    # --- FIN DEL CAMBIO ---

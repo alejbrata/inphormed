@@ -10,21 +10,16 @@ import tempfile
 import os
 import shutil
 import re
-import json # <-- Importar JSON
+import json 
 
-# Importar el parser de PPTX
 try:
     from pptx import Presentation
 except ImportError:
     print("ERROR: 'python-pptx' no está instalado. Ejecuta: pip install python-pptx")
     Presentation = None
 
-# --- ¡NUEVO! Importar cliente de OpenAI ---
-try:
-    from openai import OpenAI
-except ImportError:
-    print("ERROR: 'openai' no está instalado. Ejecuta: pip install openai")
-    OpenAI = None
+# --- Importamos el servicio MCP ---
+from app.services.llm_service import LLMService, LLMServiceError
 
 # Imports de tu lógica de TFM (Arquitectura 3)
 from app.domain.core_models import Claim, SlideContext
@@ -37,9 +32,7 @@ from app.services.annotate_service import annotate_pptx, write_snippets_html
 router = APIRouter(prefix="/api/claims", tags=["claims"])
 
 
-# --- ¡NUEVO PARSER BASADO EN LLM! ---
-# Este es el "Efecto Wow". Reemplaza el regex.
-
+# --- (El prompt del extractor se queda igual) ---
 EXTRACTOR_SYSTEM_PROMPT = """
 Eres un asistente de IA para análisis de documentos farmacéuticos.
 Tu tarea es analizar el texto de una DIAPOSITIVA de PowerPoint y extraer los "pares de validación".
@@ -62,40 +55,32 @@ Devuelve SÓLO un objeto JSON con la clave "pairs", así:
 Si no hay pares, devuelve {"pairs": []}.
 """
 
-def _get_openai_client() -> Optional[OpenAI]:
-    """Crea un cliente de OpenAI. Reutiliza la lógica de tu app."""
-    if OpenAI is None:
-        return None
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("ADVERTENCIA: OPENAI_API_KEY no encontrada. El extractor LLM fallará.")
-        return None
-    
-    # (Si usas Azure, puedes añadir la lógica de 'judge.py' aquí)
-    return OpenAI(api_key=api_key)
-
-def _extract_pairs_with_llm(slide_text: str, slide_index: int, client: OpenAI) -> List[Dict[str, Any]]:
+def _extract_pairs_with_llm(
+    slide_text: str, 
+    slide_index: int, 
+    llm_service: LLMService
+) -> List[Dict[str, Any]]:
     """
-    Usa un LLM (gpt-4o-mini) para extraer pares (claim, cita) del texto de una slide.
+    Usa un LLM (vía LLMService) para extraer pares (claim, cita).
     """
-    if not client:
-        return []
-
     try:
-        resp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), # Usar un modelo rápido
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Texto de la Diapositiva {slide_index}:\n\n---\n{slide_text}\n---"}
-            ]
+        # --- ¡CAMBIO REALIZADO AQUÍ! ---
+        # Añadimos la palabra "JSON" al user_prompt para cumplir con la API de OpenAI
+        user_prompt = (
+            f"Texto de la Diapositiva {slide_index}:\n\n---\n{slide_text}\n---\n\n"
+            "Extrae los pares (claim, cita) de este texto y devuelve un objeto JSON."
         )
-        raw_json = resp.choices[0].message.content
-        data = json.loads(raw_json)
-        pairs = data.get("pairs", [])
+        # --- FIN DEL CAMBIO ---
         
-        # Añadir el índice de la slide para trazabilidad
+        data = llm_service.chat_with_json(
+            system_prompt=EXTRACTOR_SYSTEM_PROMPT,
+            user_prompt=user_prompt
+        )
+        
+        if data is None or "pairs" not in data:
+            return []
+            
+        pairs = data.get("pairs", [])
         for p in pairs:
             p["slide_index"] = slide_index
         return pairs
@@ -119,17 +104,9 @@ async def validate_pptx_llm_first(
     render_ppt: bool = Query(True),
     mock_llm: bool = Query(False),
 ):
-    """
-    Endpoint principal para validar un PPTX.
-    1. Extrae (claim, cita) usando el PARSER LLM.
-    2. Pasa el claim + cita al orquestador (llm_first).
-    3. El orquestador usa el AgentePubMed (modificado) para buscar por cita.
-    4. El LLMJudge puntúa el paper encontrado.
-    5. Genera un PPTX anotado con colores e hipervínculos.
-    """
     raw: bytes | None = None
     up: UploadFile | None = pptx or file or upload or ppt
-    file_name = "upload.pptx" # Default
+    file_name = "upload.pptx" 
 
     if up is not None:
         if not up.filename or not up.filename.lower().endswith(".pptx"):
@@ -153,33 +130,33 @@ async def validate_pptx_llm_first(
         with open(tmp_path, "wb") as tmp:
             tmp.write(raw)
 
-        # --- ¡CAMBIO CRÍTICO! ---
-        # 1. Extracción (usando el NUEVO extractor LLM)
         if Presentation is None:
             raise HTTPException(status_code=500, detail="Dependencia 'python-pptx' no encontrada.")
         
-        llm_client = _get_openai_client()
-        if llm_client is None:
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY no configurada para el extractor.")
+        try:
+            llm_extractor_service = LLMService(
+                model=os.getenv("OPENAI_EXTRACTOR_MODEL", "gpt-4o-mini"),
+                temperature=0.0
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error al iniciar LLMService: {e}")
 
         from io import BytesIO
         prs = Presentation(BytesIO(raw))
         items = []
 
         for i, slide in enumerate(prs.slides, start=1):
-            if i == 1: continue # Ignorar portada
+            if i == 1: continue
             
             slide_text = ""
             for shape in slide.shapes:
                 if hasattr(shape, "text_frame") and shape.text_frame:
                     slide_text += shape.text_frame.text + "\n"
             
-            # Solo llamamos al LLM si la slide tiene texto
             slide_text = slide_text.strip()
             if len(slide_text) > 50: 
-                pairs_from_slide = _extract_pairs_with_llm(slide_text, i, llm_client)
+                pairs_from_slide = _extract_pairs_with_llm(slide_text, i, llm_extractor_service)
                 items.extend(pairs_from_slide)
-        # --- FIN DEL CAMBIO ---
         
         if not items:
             return JSONResponse(
@@ -188,7 +165,7 @@ async def validate_pptx_llm_first(
             )
 
         fuentes = get_default_fuentes()
-        judge = LLMJudge(mock=mock_llm)
+        judge = LLMJudge(mock=mock_llm) 
 
         results: List[Dict[str, Any]] = []
         findings_for_annotation: List[Dict[str, Any]] = [] 
@@ -196,17 +173,15 @@ async def validate_pptx_llm_first(
         for it in items:
             slide_idx = it["slide_index"]
             claim_text = it["claim_text"]
-            citation_context = it["citation_text"] # <-- El LLM ya nos lo da separado
+            citation_context = it["citation_text"] 
             
-            # 2. Preparación del Contexto
             claim = Claim(text=claim_text)
             slide = SlideContext(
                 title=f"Slide {slide_idx}",
                 excerpt=claim_text,
-                citation_string=citation_context # <-- Pasamos la cita
+                citation_string=citation_context 
             )
 
-            # 3. Orquestación
             orch = await orchestrate_llm_first(
                 claim=claim,
                 slide_ctx=slide,
@@ -215,7 +190,6 @@ async def validate_pptx_llm_first(
                 topk=topk
             )
 
-            # 4. Procesamiento de resultados
             best_url = None
             best_title = ""
             best_snippet = ""
@@ -254,12 +228,11 @@ async def validate_pptx_llm_first(
             
             results.append(api_result)
             
-            # 5. Preparar datos para el PPTX coloreado
             findings_for_annotation.append({
                 "slide": slide_idx,
                 "color": color,
                 "claim": claim_text,
-                "source_url": best_url,      # <-- El hipervínculo
+                "source_url": best_url,
                 "snippet_url": None,
                 "ref_raw": best_title[:100], 
                 "score": api_result["best_score"],
@@ -273,7 +246,6 @@ async def validate_pptx_llm_first(
             "thresholds": {"green": thr_green, "yellow": thr_yellow},
         }
 
-        # 6. Generar PPTX anotado
         if render_ppt:
             try:
                 annotated_bytes = annotate_pptx(tmp_path, out_path, findings_for_annotation)
@@ -289,11 +261,10 @@ async def validate_pptx_llm_first(
         return JSONResponse(payload)
 
     finally:
-        # Limpiar directorio temporal
         if tmp_dir and os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
 
-# --- FUSIÓN: Endpoint de /validate-text ---
+# --- (El endpoint /validate (GET) se queda igual) ---
 @router.get("/validate", summary="Valida un claim de texto (LLM-first)")
 async def validate_claim_llm_first(
     claim_text: str = Query(..., description="Texto del claim"),
@@ -303,15 +274,13 @@ async def validate_claim_llm_first(
     mock_llm: bool = Query(False, description="Usa juez simulado para pruebas")
 ):
     claim = Claim(text=claim_text)
-    
     slide = SlideContext(
         title=slide_title or "", 
         excerpt=slide_excerpt or "",
-        citation_string=f"{slide_title}\n{slide_excerpt}" # Pasamos el contexto de cita
+        citation_string=f"{slide_title}\n{slide_excerpt}"
     )
-
     fuentes = get_default_fuentes()
-    judge = LLMJudge(mock=mock_llm)
+    judge = LLMJudge(mock=mock_llm) 
 
     result = await orchestrate_llm_first(
         claim=claim,
