@@ -3,39 +3,27 @@ from __future__ import annotations
 from typing import List, Optional
 import os, re
 import httpx
-
-# --- ¡CAMBIOS CLAVE! ---
 from app.domain.core_models import Claim, CandidateDoc, SlideContext
-from app.utils.ref_extractor import extract_references # <-- ¡Importamos tu extractor!
-# --- FIN CAMBIOS ---
-
+from app.utils.ref_extractor import extract_references
 from .base import BaseSourceAgent
+
+# --- ¡CAMBIO! Importamos el Crawler y las funciones de query ---
+from .pmc_crawler import PMCCrawler, _q_title_exact, _q_title_keywords
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-NCBI_API_KEY = os.getenv("NCBI_API_KEY")  # opcional
-
-def _q_title_exact(title: str) -> str:
-    t = title.replace('"', '')
-    return f"\"{t}\"[Title]"
-
-def _q_title_keywords(text: str, extra: Optional[str] = None) -> str:
-    # Búsqueda por palabras clave (nuestro fallback)
-    words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\-]{3,}", text)
-    core = " ".join(words[:25]) 
-    q = f"({core})[Title/Abstract]"
-    if extra:
-        q += f" AND ({extra})"
-    return q
+NCBI_API_KEY = os.getenv("NCBI_API_KEY")
 
 class AgentePubMed(BaseSourceAgent):
     name = "pubmed"
-    timeout_default = 8.0
+    timeout_default = 15.0 # Aumentado para dar tiempo al crawler
 
     def __init__(self, session: Optional[httpx.AsyncClient] = None):
         self._session = session
+        # --- ¡AÑADIDO! El agente de PubMed ahora "posee" un crawler ---
+        self.crawler = PMCCrawler(session=session)
 
     async def fetch_candidates(
         self, 
@@ -48,36 +36,24 @@ class AgentePubMed(BaseSourceAgent):
         citation_query = getattr(slide_ctx, "citation_string", None)
         extra_context = "hidradenitis suppurativa[Title/Abstract] OR hidradenitis supurativa[Title/Abstract]"
 
-        async with (self._session or httpx.AsyncClient(timeout=10.0)) as client:
+        async with (self._session or httpx.AsyncClient(timeout=self.timeout_default)) as client:
             
-            # --- ¡LÓGICA DE BÚSQUEDA INTELIGENTE! ---
-
-            # 1. BÚSQUEDA POR ID (La mejor)
+            # --- (La lógica de búsqueda de 1/2/3 es la misma que antes) ---
             if citation_query:
                 refs = extract_references(citation_query)
                 pmids = refs.get("pmid", [])
                 dois = refs.get("doi", [])
-
                 if pmids:
-                    # ¡Éxito! Tenemos PMIDs directamente del texto
                     found_pmids = pmids
-                
                 elif dois:
-                    # Tenemos un DOI, lo usamos para encontrar el PMID
                     found_pmids = await self._esearch(client, dois[0], retmax=limit)
 
-            # 2. BÚSQUEDA POR CITA (Fallback 1)
-            # Si no hay IDs, buscamos por el texto de la cita (autores, etc.)
             if not found_pmids and citation_query:
-                queries = [
-                    _q_title_keywords(citation_query, extra=extra_context)
-                ]
+                queries = [_q_title_keywords(citation_query, extra=extra_context)]
                 for q in queries:
                     found_pmids = await self._esearch(client, q, retmax=limit)
                     if found_pmids: break
             
-            # 3. BÚSQUEDA POR CLAIM (Fallback 2)
-            # Si todo falla, buscamos por el texto del claim
             if not found_pmids:
                 title_guess = (claim.text or "").split("\n")[0][:220]
                 queries = [
@@ -89,12 +65,10 @@ class AgentePubMed(BaseSourceAgent):
                     found_pmids = await self._esearch(client, q, retmax=limit)
                     if found_pmids: break
             
-            # --- FIN DE LA LÓGICA DE BÚSQUEDA ---
-
             if not found_pmids:
-                return [] # No se encontró nada
+                return [] 
 
-            # --- OBTENER DATOS DE LOS PMIDS ENCONTRADOS ---
+            # --- OBTENER DATOS (Resumen y Abstract) ---
             summaries = await self._esummary(client, found_pmids)
             abstracts = await self._efetch_abstracts(client, found_pmids)
 
@@ -102,8 +76,6 @@ class AgentePubMed(BaseSourceAgent):
         for pmid in found_pmids[:limit]:
             meta = summaries.get(pmid, {})
             title = meta.get("Title") or meta.get("title") or ""
-            
-            # Si no hay título, es un resultado malo, lo saltamos
             if not title:
                 continue
 
@@ -117,8 +89,20 @@ class AgentePubMed(BaseSourceAgent):
             
             url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             abstract_text = abstracts.get(pmid, "")
-            snippet = abstract_text[:2000] # El Juez leerá esto
             
+            # --- ¡CAMBIO! BUSCAR Y DESCARGAR TEXTO COMPLETO ---
+            pmcid = None
+            full_text = None
+            for article_id in meta.get("ArticleIds", []):
+                if article_id.get("IdType") == "pmc":
+                    pmcid = article_id.get("Value")
+                    break
+            
+            if pmcid:
+                # ¡Encontrado! Lanzamos el Crawler
+                full_text = await self.crawler.fetch_full_text(pmcid)
+            # --- FIN DEL CAMBIO ---
+
             cands.append(CandidateDoc(
                 source="pubmed",
                 id=pmid,
@@ -127,12 +111,14 @@ class AgentePubMed(BaseSourceAgent):
                 journal=journal,
                 year=year,
                 url=url,
-                abstract_snippets=snippet,
-                fulltext_snippets="", # (El scraping de full-text es un paso futuro)
+                abstract=abstract_text, # Guardamos el abstract
+                full_text_content=full_text, # Guardamos el texto completo (o None)
             ))
         return cands
 
+    # ... (Los métodos _esearch, _esummary, _efetch_abstracts se quedan igual) ...
     async def _esearch(self, client: httpx.AsyncClient, query: str, retmax: int = 10) -> List[str]:
+        # ... (código sin cambios)
         params = {"db": "pubmed", "retmode": "json", "sort": "bestmatch", "retmax": retmax, "term": query}
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
@@ -145,6 +131,7 @@ class AgentePubMed(BaseSourceAgent):
             return []
 
     async def _esummary(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
+        # ... (código sin cambios)
         if not pmids: return {}
         params = {"db": "pubmed", "retmode": "json", "id": ",".join(pmids)}
         if NCBI_API_KEY:
@@ -160,6 +147,7 @@ class AgentePubMed(BaseSourceAgent):
             return {}
 
     async def _efetch_abstracts(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
+        # ... (código sin cambios)
         if not pmids: return {}
         params = {"db": "pubmed", "retmode": "xml", "id": ",".join(pmids)}
         if NCBI_API_KEY:
@@ -169,7 +157,6 @@ class AgentePubMed(BaseSourceAgent):
             r.raise_for_status()
             xml = r.text
             abstracts: dict = {}
-        
             articles = re.findall(r"<PubmedArticle>(.*?)</PubmedArticle>", xml, flags=re.S)
             for art in articles:
                 pmid_match = re.search(r"<PMID[^>]*>(\d+)</PMID>", art)

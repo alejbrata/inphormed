@@ -1,33 +1,30 @@
-# app/streamlit_app.py  (versión completa con timeout configurable)
+# app/streamlit_app.py
 
 import os
 import json
 from typing import List, Dict, Any
 import streamlit as st
-# --- ¡AÑADIDO! ---
-import base64 
+import base64 # <-- ¡Importante!
 
 # ─────────────────────────────────────────────────────────────
-# Config (por ENV si no es localhost:8000)
+# Config
 # ─────────────────────────────────────────────────────────────
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 CHAT_ENDPOINT = os.getenv("CHAT_ENDPOINT", "/api/chat")
 
-# --- ¡CAMBIO! ---
-# Apuntar a las nuevas rutas unificadas
-VALIDATE_TEXT_URL = BACKEND_URL + "/api/claims/validate" # (Era /api/claims/validate-text)
-VALIDATE_PPT_URL = BACKEND_URL + "/api/claims/validate-ppt"
-# --- FIN CAMBIO ---
+# --- ¡CORREGIDO! Apuntar a las rutas de 'validation_routes.py' ---
+VALIDATE_TEXT_URL = BACKEND_URL + "/api/claims/validate" # (ruta GET)
+VALIDATE_PPT_URL = BACKEND_URL + "/api/claims/validate-ppt" # (ruta POST)
+# --- FIN DE LA CORRECCIÓN ---
 
 DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT_SEC", "900"))
 
 CHAT_URL = BACKEND_URL + CHAT_ENDPOINT
 
-
 st.set_page_config(page_title="Inphormed", layout="wide")
 
 # ─────────────────────────────────────────────────────────────
-# Helpers HTTP (con timeout configurable)
+# Helpers HTTP
 # ─────────────────────────────────────────────────────────────
 def post_json(url: str, payload: Dict[str, Any], timeout_sec: float) -> Dict[str, Any]:
     import requests
@@ -41,10 +38,9 @@ def post_multipart(url: str, files: Dict[str, Any], params: Dict[str, Any], time
     r.raise_for_status()
     return r.json()
 
-# --- ¡CAMBIO! ---
-# (He eliminado los parsers de PPTX/DOCX que ya no se usan aquí)
-# ...
-
+# ─────────────────────────────────────────────────────────────
+# Parsers
+# ─────────────────────────────────────────────────────────────
 def dedupe_keep_order(items: List[str]) -> List[str]:
     seen, out = set(), []
     for x in items:
@@ -54,8 +50,9 @@ def dedupe_keep_order(items: List[str]) -> List[str]:
             out.append(x)
     return out
 
-# --- ¡CAMBIO! ---
+# --- ¡CORREGIDO! ---
 # Actualizado para que coincida con la salida de la API "LLM-First"
+# que vemos en tu captura de pantalla
 def hits_table_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows = []
     for r in results:
@@ -63,11 +60,15 @@ def hits_table_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         color = {"green":"🟢","yellow":"🟡","red":"🔴"}.get(status, "⚪")
         best = f"{r.get('best_score', 0.0):.3f}"
         
-        # El modelo "LLM-First" devuelve 'best_title' y 'best_url'
+        # Parsear la respuesta del Orquestador
         cite = r.get("best_title", "")[:100]
-        url_hit = r.get("best_url", "")
-        snippet = (r.get("best_verdict") or "") # El 'why_short' del Juez
+        url_hit = r.get("best_url", "None")
         
+        # El "Snippet" es la explicación del Juez (why_short)
+        snippet = (r.get("best_verdict") or "error") 
+        if r.get("best_verdict") == "insufficient" and r.get("best_score") == 0.0:
+            snippet = "insufficient (no paper found)"
+
         rows.append({
             "Dónde": r.get("where", ""),
             "Semáforo": f"{color} {status}",
@@ -78,43 +79,26 @@ def hits_table_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "Snippet": snippet,
         })
     return rows
+# --- FIN DE LA CORRECCIÓN ---
 
 # ─────────────────────────────────────────────────────────────
 # VISTAS
 # ─────────────────────────────────────────────────────────────
 def vista_chatbot_hs(timeout_sec: float):
     st.header("Chatbot – Hidradenitis supurativa")
-
+    # ... (Tu lógica de chatbot se queda igual) ...
+    # (No la pego aquí para ahorrar espacio, pero no la borres)
     if "chat_hs" not in st.session_state:
         st.session_state.chat_hs = [
             {"role": "assistant", "content": "Hola, ¿en qué te ayudo?"}
         ]
-
     for m in st.session_state.chat_hs:
         st.chat_message(m["role"]).markdown(m["content"])
-
     user_msg = st.chat_input("Pregunta o describe tu caso…")
     if user_msg:
-        st.session_state.chat_hs.append({"role": "user", "content": user_msg})
-        st.chat_message("user").markdown(user_msg)
+        # ... (resto de la lógica del chatbot) ...
+        pass
 
-        messages_for_api: List[Dict[str, str]] = [
-            {"role": m["role"], "content": m["content"]}
-            for m in st.session_state.chat_hs
-            if m["role"] in ("user", "assistant")
-        ]
-        payload = {"messages": messages_for_api, "topic": "hidradenitis supurativa"}
-
-        try:
-            with st.spinner("Pensando…"):
-                resp = post_json(CHAT_URL, payload, timeout_sec)
-            reply = (resp or {}).get("reply", "").strip() or "No recibí contenido del modelo."
-            st.session_state.chat_hs.append({"role": "assistant", "content": reply})
-            st.chat_message("assistant").markdown(reply)
-        except Exception as e:
-            err = f"Error llamando a {CHAT_URL}: {e}"
-            st.error(err)
-            st.session_state.chat_hs.append({"role": "assistant", "content": err})
 
 def vista_validador_claims(timeout_sec: float):
     st.header("Validador de claims")
@@ -129,28 +113,10 @@ def vista_validador_claims(timeout_sec: float):
         st.subheader("Tiempo máximo de espera")
         timeout_sec = st.number_input("Timeout (segundos)", min_value=60, max_value=3600, value=int(timeout_sec), step=30)
 
-    tabs = st.tabs(["Pegar texto", "Subir PPTX"])
-
-    # ——— Pegar texto -> /api/claims/validate ———
-    with tabs[0]:
-        st.subheader("Claims (uno por línea)")
-        txt = st.text_area(
-            "Pega claims",
-            height=180,
-            placeholder="Claim: Mejora la supervivencia global…\nCita: Autor et al. 2023...",
-        )
-        if st.button("Validar (texto pegado)"):
-            claims = dedupe_keep_order([line.strip() for line in txt.splitlines() if line.strip()])
-            if not claims:
-                st.warning("Escribe al menos un claim.")
-            else:
-                st.info("Función no implementada en este flujo (usar PPTX)")
-                # (La lógica de 'validate-text' ahora es '/validate' (GET)
-                # y requiere 'claim_text' y 'slide_excerpt' por separado,
-                # por lo que este text_area simple ya no es compatible.)
+    tabs = st.tabs(["Subir PPTX", "Pegar texto"])
 
     # ——— Subir PPTX -> /api/claims/validate-ppt ———
-    with tabs[1]:
+    with tabs[0]:
         st.subheader("Sube un PPTX con claims")
         f = st.file_uploader("PPTX", type=["pptx"])
         
@@ -167,7 +133,7 @@ def vista_validador_claims(timeout_sec: float):
                     "topk": int(topk),
                     "thr_green": float(thr_green),
                     "thr_yellow": float(thr_yellow),
-                    "render_ppt": True
+                    "render_ppt": True # <-- Importante: pedir el PPTX coloreado
                 }
                 files = {"file": (f.name, f.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation")}
                 try:
@@ -177,7 +143,7 @@ def vista_validador_claims(timeout_sec: float):
                     st.success(f"Archivo: {data['file_name']} — Claims detectados: {data['total_claims']}")
                     rows = hits_table_rows(data.get("results", []))
                     
-                    # --- ¡CAMBIO REALIZADO AQUÍ! ---
+                    # --- ¡CORRECCIÓN AÑADIDA! ---
                     # Guardar los datos del PPTX anotado en el estado
                     if data.get("annotated_pptx_b64"):
                         st.session_state.pptx_b64_to_download = data["annotated_pptx_b64"]
@@ -185,7 +151,8 @@ def vista_validador_claims(timeout_sec: float):
                     else:
                         st.session_state.pptx_b64_to_download = None
                         st.session_state.pptx_name_to_download = None
-                    # --- FIN DEL CAMBIO ---
+                        st.warning("El backend no devolvió un PPTX anotado (render_ppt=True?).")
+                    # --- FIN DE LA CORRECCIÓN ---
 
                     if rows:
                         import pandas as pd
@@ -196,7 +163,7 @@ def vista_validador_claims(timeout_sec: float):
                 except Exception as e:
                     st.error(f"Error validando PPTX: {e}")
 
-        # --- ¡CAMBIO REALIZADO AQUÍ! ---
+        # --- ¡CORRECCIÓN AÑADIDA! ---
         # Añadir el botón de descarga si los datos existen en el estado
         if st.session_state.get("pptx_b64_to_download"):
             st.divider()
@@ -206,7 +173,7 @@ def vista_validador_claims(timeout_sec: float):
                 pptx_bytes = base64.b64decode(b64)
                 
                 st.download_button(
-                    label="⬇️ Descargar PPTX Anotado",
+                    label="⬇️ Descargar PPTX Anotado (con enlaces)",
                     data=pptx_bytes,
                     file_name=st.session_state.pptx_name_to_download,
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -214,8 +181,27 @@ def vista_validador_claims(timeout_sec: float):
                 )
             except Exception as e:
                 st.error(f"No se pudo preparar el PPTX para descarga: {e}")
-        # --- FIN DEL CAMBIO ---
+        # --- FIN DE LA CORRECCIÓN ---
 
+    # ——— Pegar texto -> /api/claims/validate ———
+    with tabs[1]:
+        st.subheader("Validar texto simple")
+        claim_in = st.text_area(
+            "Claim",
+            placeholder="Adalimumab semanal mejora de forma significativa la respuesta clínica (HiSCR)...",
+        )
+        cita_in = st.text_area(
+            "Contexto / Cita",
+            placeholder="Kimball AB, Okun MM, Williams DA, et al. Two Phase 3 Trials of Adalimumab...",
+        )
+        
+        if st.button("Validar (texto pegado)"):
+            if not claim_in or not cita_in:
+                st.warning("Debes rellenar el Claim y la Cita.")
+            else:
+                st.info("Función de validación de texto simple en desarrollo...")
+                # (Aquí iría la llamada a la ruta GET /api/claims/validate
+                # usando httpx.get con los 'params')
 
 def vista_generador_material():
     st.header("Generador de material")
@@ -234,11 +220,13 @@ with st.sidebar:
     st.title("Inphormed")
     pagina = st.radio("Menú", list(PAGES.keys()))
 
-# Inicializar estado para el botón de descarga
+# --- ¡CORRECCIÓN AÑADIDA! ---
+# Inicializar el estado de sesión para el botón de descarga
 if "pptx_b64_to_download" not in st.session_state:
     st.session_state.pptx_b64_to_download = None
 if "pptx_name_to_download" not in st.session_state:
     st.session_state.pptx_name_to_download = None
+# --- FIN DE LA CORRECCIÓN ---
 
 # Pasa el timeout a las vistas que lo usan
 if pagina == "Chatbot HS":

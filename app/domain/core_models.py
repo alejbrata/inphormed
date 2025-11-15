@@ -26,6 +26,9 @@ class JudgeResult(BaseModel):
     why_short: str
     evidence_quotes: List[EvidenceQuote] = []
     meta_alignment: MetaAlignment
+    # --- ¡AÑADIDO! ---
+    # El snippet exacto (chunk) que usó el Juez para su veredicto
+    best_snippet: Optional[str] = None 
 
 # ============
 # Dominio
@@ -38,21 +41,25 @@ class Claim(BaseModel):
 class SlideContext(BaseModel):
     title: str = ""
     excerpt: str = ""
-    # --- ¡CAMBIO REALIZADO AQUÍ! ---
     citation_string: Optional[str] = None 
 
 class CandidateDoc(BaseModel):
     source: str
-    id: str
+    id: str                      # pmid / doi / url
     title: str
     authors: List[str] = []
     journal: Optional[str] = None
     year: Optional[int] = None
     url: Optional[str] = None
-    abstract_snippets: str = ""
-    fulltext_snippets: str = ""
+    
+    # --- ¡CAMBIO! ---
+    # Reemplazamos el snippet del abstract por el texto completo
+    abstract: Optional[str] = None         # Guardamos el abstract por si acaso
+    full_text_content: Optional[str] = None # Aquí irá el texto completo del Crawler
+
     latency_ms: Optional[int] = None
 
+    # Rellenados por el juez LLM:
     score: Optional[float] = None
     verdict: Optional[Literal["supports", "refutes", "insufficient"]] = None
     llm_judgement: Optional[JudgeResult] = None
@@ -72,6 +79,9 @@ class RankedItem(BaseModel):
     url: Optional[str] = None
     year: Optional[int] = None
     journal: Optional[str] = None
+    # --- ¡AÑADIDO! ---
+    # Pasamos el snippet al resultado final
+    best_snippet: Optional[str] = None
 
 class OrchestratorResult(BaseModel):
     claim_id: Optional[str] = None

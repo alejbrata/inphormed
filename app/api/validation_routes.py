@@ -4,13 +4,14 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import uuid
 from fastapi import APIRouter, UploadFile, File, Query, HTTPException, Body, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse 
 import base64
 import tempfile
 import os
 import shutil
 import re
 import json 
+import urllib.parse 
 
 try:
     from pptx import Presentation
@@ -18,21 +19,21 @@ except ImportError:
     print("ERROR: 'python-pptx' no está instalado. Ejecuta: pip install python-pptx")
     Presentation = None
 
-# --- Importamos el servicio MCP ---
-from app.services.llm_service import LLMService, LLMServiceError
+try:
+    from openai import OpenAI
+except ImportError:
+    print("ERROR: 'openai' no está instalado. Ejecuta: pip install openai")
+    OpenAI = None
 
-# Imports de tu lógica de TFM (Arquitectura 3)
+from app.services.llm_service import LLMService, LLMServiceError
 from app.domain.core_models import Claim, SlideContext
 from app.llm.judge import LLMJudge
 from app.agents.sources.registry import get_default_fuentes
 from app.agents.orchestrator.llm_first import orchestrate_llm_first
 from app.services.annotate_service import annotate_pptx, write_snippets_html
 
-# --- Definición del router ---
-router = APIRouter(prefix="/api/claims", tags=["claims"])
+router = APIRouter(prefix="/api", tags=["claims"])
 
-
-# --- (El prompt del extractor se queda igual) ---
 EXTRACTOR_SYSTEM_PROMPT = """
 Eres un asistente de IA para análisis de documentos farmacéuticos.
 Tu tarea es analizar el texto de una DIAPOSITIVA de PowerPoint y extraer los "pares de validación".
@@ -55,22 +56,26 @@ Devuelve SÓLO un objeto JSON con la clave "pairs", así:
 Si no hay pares, devuelve {"pairs": []}.
 """
 
+# --- ¡NUEVO! Caché en memoria para los snippets ---
+SNIPPET_CACHE: Dict[str, Dict[str, Any]] = {}
+
+# --- ¡CORREGIDO! ---
+# Esta es la función que daba el SyntaxError.
+# Reemplazamos '...' con los argumentos reales.
 def _extract_pairs_with_llm(
     slide_text: str, 
     slide_index: int, 
     llm_service: LLMService
 ) -> List[Dict[str, Any]]:
+# --- FIN DE LA CORRECCIÓN ---
     """
     Usa un LLM (vía LLMService) para extraer pares (claim, cita).
     """
     try:
-        # --- ¡CAMBIO REALIZADO AQUÍ! ---
-        # Añadimos la palabra "JSON" al user_prompt para cumplir con la API de OpenAI
         user_prompt = (
             f"Texto de la Diapositiva {slide_index}:\n\n---\n{slide_text}\n---\n\n"
             "Extrae los pares (claim, cita) de este texto y devuelve un objeto JSON."
         )
-        # --- FIN DEL CAMBIO ---
         
         data = llm_service.chat_with_json(
             system_prompt=EXTRACTOR_SYSTEM_PROMPT,
@@ -82,7 +87,8 @@ def _extract_pairs_with_llm(
             
         pairs = data.get("pairs", [])
         for p in pairs:
-            p["slide_index"] = slide_index
+            if isinstance(p, dict): # Asegurarnos de que el LLM devuelve lo que queremos
+                p["slide_index"] = slide_index
         return pairs
     
     except Exception as e:
@@ -90,7 +96,7 @@ def _extract_pairs_with_llm(
         return []
 
 
-@router.post("/validate-ppt", summary="Valida un PPTX con claims (LLM-first)")
+@router.post("/claims/validate-ppt", summary="Valida un PPTX con claims (LLM-first)")
 async def validate_pptx_llm_first(
     request: Request,
     pptx: UploadFile | None = File(None, description="Archivo .pptx"),
@@ -170,6 +176,8 @@ async def validate_pptx_llm_first(
         results: List[Dict[str, Any]] = []
         findings_for_annotation: List[Dict[str, Any]] = [] 
 
+        SNIPPET_CACHE.clear()
+
         for it in items:
             slide_idx = it["slide_index"]
             claim_text = it["claim_text"]
@@ -192,14 +200,14 @@ async def validate_pptx_llm_first(
 
             best_url = None
             best_title = ""
-            best_snippet = ""
+            best_snippet = None
             
             if orch.best:
                 score = float(orch.best.score)
                 color = "green" if score >= thr_green else ("yellow" if score >= thr_yellow else "red")
-                best_url = orch.best.url
+                best_url = orch.best.url 
                 best_title = orch.best.title
-                best_snippet = orch.best.why_short
+                best_snippet = orch.best.best_snippet
                 
                 api_result = {
                     "where": f"slide:{slide_idx}",
@@ -228,15 +236,25 @@ async def validate_pptx_llm_first(
             
             results.append(api_result)
             
+            snippet_id = None
+            if best_snippet and orch.best and orch.best.id:
+                snippet_id = f"pmid_{orch.best.id}_slide_{slide_idx}"
+                SNIPPET_CACHE[snippet_id] = {
+                    "claim": claim_text,
+                    "snippet": best_snippet,
+                    "paper_title": best_title,
+                    "pubmed_url": best_url
+                }
+
             findings_for_annotation.append({
                 "slide": slide_idx,
                 "color": color,
                 "claim": claim_text,
-                "source_url": best_url,
+                "source_url": f"/api/viewer?id={snippet_id}" if snippet_id else best_url,
                 "snippet_url": None,
                 "ref_raw": best_title[:100], 
                 "score": api_result["best_score"],
-                "source_excerpt": best_snippet,
+                "source_excerpt": best_snippet[:300] if best_snippet else "",
             })
 
         payload: Dict[str, Any] = {
@@ -264,8 +282,8 @@ async def validate_pptx_llm_first(
         if tmp_dir and os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
 
-# --- (El endpoint /validate (GET) se queda igual) ---
-@router.get("/validate", summary="Valida un claim de texto (LLM-first)")
+
+@router.get("/claims/validate", summary="Valida un claim de texto (LLM-first)")
 async def validate_claim_llm_first(
     claim_text: str = Query(..., description="Texto del claim"),
     slide_title: Optional[str] = Query("", description="Título de la slide (contexto)"),
@@ -290,3 +308,68 @@ async def validate_claim_llm_first(
         topk=topk,
     )
     return result
+
+
+@router.get("/viewer", response_class=HTMLResponse)
+async def get_snippet_viewer(id: str = Query(..., description="ID del snippet cacheado")):
+    """
+    Esta es la página del "efecto wow". Muestra la evidencia resaltada.
+    """
+    data = SNIPPET_CACHE.get(id)
+    if not data:
+        return HTMLResponse("<h1>Error</h1><p>Snippet no encontrado o caché expirada.</p>", status_code=404)
+
+    snippet_html = data['snippet']
+    try:
+        claim_words = re.findall(r'\b\w{4,}\b', data['claim'].lower())
+        for word in set(claim_words):
+            snippet_html = re.sub(
+                f"({re.escape(word)})", 
+                r"<mark>\1</mark>", 
+                snippet_html, 
+                flags=re.IGNORECASE
+            )
+    except Exception:
+        snippet_html = data['snippet'] # Fallback
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Visor de Evidencia</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; background-color: #f4f7f6; }}
+            .container {{ max-width: 900px; margin: 20px auto; padding: 30px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
+            h1 {{ color: #1a3a53; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }}
+            h2 {{ color: #333; }}
+            .claim {{ background-color: #e6f7ff; border-left: 5px solid #007bff; padding: 15px; border-radius: 5px; font-style: italic; }}
+            .paper {{ font-size: 0.9em; color: #555; }}
+            .snippet {{ background-color: #f9f9f9; border: 1px solid #ddd; padding: 20px; border-radius: 5px; line-height: 1.7; }}
+            mark {{ background-color: #fff799; padding: 2px 0; }}
+            footer {{ margin-top: 20px; font-size: 0.8em; color: #888; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Visor de Evidencia</h1>
+            
+            <h2>Claim Validado:</h2>
+            <div class="claim">"{data['claim']}"</div>
+            
+            <h2>Evidencia (Fragmento del Texto Completo):</h2>
+            <div class="snippet">
+                <p>{snippet_html.replace(r'\n', '<br><br>')}</p>
+            </div>
+            
+            <footer>
+                <p><strong>Paper:</strong> {data['paper_title']}</p>
+                <p><strong>Enlace a PubMed:</strong> <a href="{data['pubmed_url']}" target="_blank">{data['pubmed_url']}</a></p>
+                <p>ID de Snippet: {id}</p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
