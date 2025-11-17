@@ -1,14 +1,18 @@
 # app/agents/sources/pubmed.py
 from __future__ import annotations
 from typing import List, Optional
-import os, re
+import os
+import re
 import httpx
+import asyncio
+
 from app.domain.core_models import Claim, CandidateDoc, SlideContext
 from app.utils.ref_extractor import extract_references
 from .base import BaseSourceAgent
 
-# --- ¡CAMBIO! Importamos el Crawler y las funciones de query ---
+# Importamos los crawlers y helpers
 from .pmc_crawler import PMCCrawler, _q_title_exact, _q_title_keywords
+from .browser_crawler import BrowserCrawler
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
@@ -18,12 +22,14 @@ NCBI_API_KEY = os.getenv("NCBI_API_KEY")
 
 class AgentePubMed(BaseSourceAgent):
     name = "pubmed"
-    timeout_default = 15.0 # Aumentado para dar tiempo al crawler
+    # Damos margen global, pero controlaremos cada paper individualmente
+    timeout_default = 60.0 
 
     def __init__(self, session: Optional[httpx.AsyncClient] = None):
         self._session = session
-        # --- ¡AÑADIDO! El agente de PubMed ahora "posee" un crawler ---
-        self.crawler = PMCCrawler(session=session)
+        # Instanciamos ambos crawlers
+        self.pmc_crawler = PMCCrawler(session=session)
+        self.browser_crawler = BrowserCrawler()
 
     async def fetch_candidates(
         self, 
@@ -36,24 +42,29 @@ class AgentePubMed(BaseSourceAgent):
         citation_query = getattr(slide_ctx, "citation_string", None)
         extra_context = "hidradenitis suppurativa[Title/Abstract] OR hidradenitis supurativa[Title/Abstract]"
 
-        async with (self._session or httpx.AsyncClient(timeout=self.timeout_default)) as client:
+        async with (self._session or httpx.AsyncClient(timeout=30.0)) as client:
             
-            # --- (La lógica de búsqueda de 1/2/3 es la misma que antes) ---
+            # --- 1. BÚSQUEDA POR ID (Prioridad Máxima) ---
             if citation_query:
                 refs = extract_references(citation_query)
                 pmids = refs.get("pmid", [])
                 dois = refs.get("doi", [])
+                
                 if pmids:
                     found_pmids = pmids
                 elif dois:
+                    # Si tenemos DOI, preguntamos a PubMed cuál es su PMID
                     found_pmids = await self._esearch(client, dois[0], retmax=limit)
 
+            # --- 2. BÚSQUEDA POR CITA (Fallback 1) ---
             if not found_pmids and citation_query:
+                # Usamos palabras clave de la cita (autores, año...)
                 queries = [_q_title_keywords(citation_query, extra=extra_context)]
                 for q in queries:
                     found_pmids = await self._esearch(client, q, retmax=limit)
                     if found_pmids: break
             
+            # --- 3. BÚSQUEDA POR CLAIM (Fallback 2) ---
             if not found_pmids:
                 title_guess = (claim.text or "").split("\n")[0][:220]
                 queries = [
@@ -68,40 +79,59 @@ class AgentePubMed(BaseSourceAgent):
             if not found_pmids:
                 return [] 
 
-            # --- OBTENER DATOS (Resumen y Abstract) ---
+            # --- RECUPERACIÓN DE METADATOS ---
             summaries = await self._esummary(client, found_pmids)
             abstracts = await self._efetch_abstracts(client, found_pmids)
 
+        # --- PROCESAMIENTO Y FULL TEXT (El paso lento) ---
         cands: List[CandidateDoc] = []
+        
         for pmid in found_pmids[:limit]:
             meta = summaries.get(pmid, {})
             title = meta.get("Title") or meta.get("title") or ""
-            if not title:
-                continue
+            if not title: continue
 
             authors = [a.get("Name") or a.get("name") for a in meta.get("Authors", []) if a]
             journal = meta.get("FullJournalName") or meta.get("Source")
             year = None
-            try:
+            try: 
                 year = int((meta.get("PubDate") or "").split()[0])
-            except Exception:
+            except Exception: 
                 pass
             
             url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             abstract_text = abstracts.get(pmid, "")
             
-            # --- ¡CAMBIO! BUSCAR Y DESCARGAR TEXTO COMPLETO ---
-            pmcid = None
+            # --- ESTRATEGIA HÍBRIDA DE TEXTO COMPLETO ---
             full_text = None
-            for article_id in meta.get("ArticleIds", []):
-                if article_id.get("IdType") == "pmc":
-                    pmcid = article_id.get("Value")
-                    break
             
-            if pmcid:
-                # ¡Encontrado! Lanzamos el Crawler
-                full_text = await self.crawler.fetch_full_text(pmcid)
-            # --- FIN DEL CAMBIO ---
+            # A. Detectar IDs disponibles
+            pmcid = None
+            doi = None
+            for article_id in meta.get("ArticleIds", []):
+                id_type = article_id.get("IdType")
+                if id_type == "pmc":
+                    pmcid = article_id.get("Value")
+                elif id_type == "doi":
+                    doi = article_id.get("Value")
+
+            try:
+                # B. Intentar PMC (Rápido, sin navegador)
+                if pmcid:
+                    full_text = await self.pmc_crawler.fetch_full_text(pmcid)
+                
+                # C. Si falla PMC, intentar Web del Editor (Lento, con navegador)
+                if not full_text and doi:
+                    target_url = f"https://doi.org/{doi}"
+                    # ¡IMPORTANTE! Timeout defensivo de 25s por paper.
+                    # Si el navegador se cuelga, cortamos aquí y devolvemos el abstract.
+                    full_text = await asyncio.wait_for(
+                        self.browser_crawler.fetch_full_text(target_url),
+                        timeout=25.0 
+                    )
+            except Exception as e:
+                print(f"AgentePubMed: Error/Timeout recuperando full-text para {pmid}: {e}")
+                # Fallback silencioso: full_text se queda en None (se usará el abstract)
 
             cands.append(CandidateDoc(
                 source="pubmed",
@@ -111,14 +141,15 @@ class AgentePubMed(BaseSourceAgent):
                 journal=journal,
                 year=year,
                 url=url,
-                abstract=abstract_text, # Guardamos el abstract
-                full_text_content=full_text, # Guardamos el texto completo (o None)
+                abstract=abstract_text,
+                full_text_content=full_text, # Puede ser None si falló el crawler
             ))
+            
         return cands
 
-    # ... (Los métodos _esearch, _esummary, _efetch_abstracts se quedan igual) ...
+    # --- Métodos auxiliares de la API de PubMed ---
+
     async def _esearch(self, client: httpx.AsyncClient, query: str, retmax: int = 10) -> List[str]:
-        # ... (código sin cambios)
         params = {"db": "pubmed", "retmode": "json", "sort": "bestmatch", "retmax": retmax, "term": query}
         if NCBI_API_KEY:
             params["api_key"] = NCBI_API_KEY
@@ -131,7 +162,6 @@ class AgentePubMed(BaseSourceAgent):
             return []
 
     async def _esummary(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
-        # ... (código sin cambios)
         if not pmids: return {}
         params = {"db": "pubmed", "retmode": "json", "id": ",".join(pmids)}
         if NCBI_API_KEY:
@@ -147,7 +177,6 @@ class AgentePubMed(BaseSourceAgent):
             return {}
 
     async def _efetch_abstracts(self, client: httpx.AsyncClient, pmids: List[str]) -> dict:
-        # ... (código sin cambios)
         if not pmids: return {}
         params = {"db": "pubmed", "retmode": "xml", "id": ",".join(pmids)}
         if NCBI_API_KEY:

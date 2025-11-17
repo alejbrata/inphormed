@@ -56,18 +56,14 @@ Devuelve SÓLO un objeto JSON con la clave "pairs", así:
 Si no hay pares, devuelve {"pairs": []}.
 """
 
-# --- ¡NUEVO! Caché en memoria para los snippets ---
+# Caché en memoria
 SNIPPET_CACHE: Dict[str, Dict[str, Any]] = {}
 
-# --- ¡CORREGIDO! ---
-# Esta es la función que daba el SyntaxError.
-# Reemplazamos '...' con los argumentos reales.
 def _extract_pairs_with_llm(
     slide_text: str, 
     slide_index: int, 
     llm_service: LLMService
 ) -> List[Dict[str, Any]]:
-# --- FIN DE LA CORRECCIÓN ---
     """
     Usa un LLM (vía LLMService) para extraer pares (claim, cita).
     """
@@ -87,7 +83,7 @@ def _extract_pairs_with_llm(
             
         pairs = data.get("pairs", [])
         for p in pairs:
-            if isinstance(p, dict): # Asegurarnos de que el LLM devuelve lo que queremos
+            if isinstance(p, dict):
                 p["slide_index"] = slide_index
         return pairs
     
@@ -99,14 +95,14 @@ def _extract_pairs_with_llm(
 @router.post("/claims/validate-ppt", summary="Valida un PPTX con claims (LLM-first)")
 async def validate_pptx_llm_first(
     request: Request,
-    pptx: UploadFile | None = File(None, description="Archivo .pptx"),
-    file: UploadFile | None = File(None, description="Archivo .pptx (alias)"),
-    upload: UploadFile | None = File(None, description="Archivo .pptx (alias)"),
-    ppt: UploadFile | None = File(None, description="Archivo .pptx (alias)"),
+    pptx: UploadFile | None = File(None),
+    file: UploadFile | None = File(None),
+    upload: UploadFile | None = File(None),
+    ppt: UploadFile | None = File(None),
     pptx_b64: Optional[str] = Body(None),
-    topk: int = Query(8, ge=1, le=15),
-    thr_green: float = Query(0.82, ge=0.0, le=1.0),
-    thr_yellow: float = Query(0.70, ge=0.0, le=1.0),
+    topk: int = Query(8),
+    thr_green: float = Query(0.82),
+    thr_yellow: float = Query(0.70),
     render_ppt: bool = Query(True),
     mock_llm: bool = Query(False),
 ):
@@ -220,6 +216,23 @@ async def validate_pptx_llm_first(
                     "ranked": [ri.model_dump() for ri in orch.topk],
                     "timings_ms": orch.timings_ms,
                 }
+                
+                # --- ¡CAMBIO! Guardar texto completo en caché ---
+                if best_snippet and orch.best.id:
+                    snippet_id = f"pmid_{orch.best.id}_slide_{slide_idx}"
+                    full_text_to_show = orch.best.full_text or best_snippet # Fallback al snippet si no hay fulltext
+                    
+                    SNIPPET_CACHE[snippet_id] = {
+                        "claim": claim_text,
+                        "snippet": best_snippet,
+                        "full_text": full_text_to_show,
+                        "paper_title": best_title,
+                        "pubmed_url": best_url
+                    }
+                    # Actualizar URL para el anotador
+                    best_url = f"/api/viewer?id={snippet_id}"
+                # ------------------------------------------------
+
             else:
                 color = "red"
                 api_result = {
@@ -236,21 +249,11 @@ async def validate_pptx_llm_first(
             
             results.append(api_result)
             
-            snippet_id = None
-            if best_snippet and orch.best and orch.best.id:
-                snippet_id = f"pmid_{orch.best.id}_slide_{slide_idx}"
-                SNIPPET_CACHE[snippet_id] = {
-                    "claim": claim_text,
-                    "snippet": best_snippet,
-                    "paper_title": best_title,
-                    "pubmed_url": best_url
-                }
-
             findings_for_annotation.append({
                 "slide": slide_idx,
                 "color": color,
                 "claim": claim_text,
-                "source_url": f"/api/viewer?id={snippet_id}" if snippet_id else best_url,
+                "source_url": best_url, # Ya es el link al visor
                 "snippet_url": None,
                 "ref_raw": best_title[:100], 
                 "score": api_result["best_score"],
@@ -274,7 +277,6 @@ async def validate_pptx_llm_first(
                 print(f"Error annotating PPTX: {e_annotate}")
                 payload["annotated_pptx_b64"] = None
                 payload["annotated_file_name"] = None
-
 
         return JSONResponse(payload)
 
@@ -309,66 +311,77 @@ async def validate_claim_llm_first(
     )
     return result
 
+# --- ¡EL VISOR WOW! ---
+# En app/api/validation_routes.py
 
 @router.get("/viewer", response_class=HTMLResponse)
 async def get_snippet_viewer(id: str = Query(..., description="ID del snippet cacheado")):
-    """
-    Esta es la página del "efecto wow". Muestra la evidencia resaltada.
-    """
     data = SNIPPET_CACHE.get(id)
     if not data:
         return HTMLResponse("<h1>Error</h1><p>Snippet no encontrado o caché expirada.</p>", status_code=404)
 
-    snippet_html = data['snippet']
-    try:
-        claim_words = re.findall(r'\b\w{4,}\b', data['claim'].lower())
-        for word in set(claim_words):
-            snippet_html = re.sub(
-                f"({re.escape(word)})", 
-                r"<mark>\1</mark>", 
-                snippet_html, 
-                flags=re.IGNORECASE
-            )
-    except Exception:
-        snippet_html = data['snippet'] # Fallback
+    full_text = data.get("full_text", "")
+    snippet = data.get("snippet", "")
+    
+    # --- DETECCIÓN DE TIPO DE TEXTO ---
+    # Si el texto es muy corto (<3000 chars), probablemente sea solo el abstract
+    is_abstract_only = len(full_text) < 3000
+    source_label = "⚠️ ABSTRACT (Texto completo no disponible)" if is_abstract_only else "📄 TEXTO COMPLETO (Extraído)"
+    source_class = "warning" if is_abstract_only else "success"
+    # ----------------------------------
+
+    # Lógica de resaltado (igual que antes)
+    if snippet and snippet in full_text:
+        highlighted_snippet = f'<span id="evidence-target" class="highlight">{snippet}</span>'
+        content_html = full_text.replace(snippet, highlighted_snippet)
+    else:
+        content_html = f'<div class="highlight-box"><strong>Evidencia (Snippet del Juez):</strong><br>{snippet}</div><hr>{full_text}'
+
+    content_html = content_html.replace("\n", "<br>")
 
     html = f"""
     <!DOCTYPE html>
     <html lang="es">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Visor de Evidencia</title>
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; background-color: #f4f7f6; }}
-            .container {{ max-width: 900px; margin: 20px auto; padding: 30px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
-            h1 {{ color: #1a3a53; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }}
-            h2 {{ color: #333; }}
-            .claim {{ background-color: #e6f7ff; border-left: 5px solid #007bff; padding: 15px; border-radius: 5px; font-style: italic; }}
-            .paper {{ font-size: 0.9em; color: #555; }}
-            .snippet {{ background-color: #f9f9f9; border: 1px solid #ddd; padding: 20px; border-radius: 5px; line-height: 1.7; }}
-            mark {{ background-color: #fff799; padding: 2px 0; }}
-            footer {{ margin-top: 20px; font-size: 0.8em; color: #888; }}
+            body {{ font-family: "Georgia", serif; line-height: 1.6; margin: 0; padding: 0; background: #f9f9f9; color: #333; }}
+            .container {{ max-width: 800px; margin: 40px auto; padding: 40px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+            h1 {{ font-family: "Segoe UI", sans-serif; color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+            .meta {{ background: #f0f4f8; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #3498db; }}
+            
+            /* Etiqueta de tipo de fuente */
+            .source-tag {{ display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-family: sans-serif; font-size: 0.8em; margin-bottom: 10px; }}
+            .source-tag.warning {{ background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+            .source-tag.success {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+
+            .highlight {{ background-color: #fffacd; border-bottom: 2px solid #f1c40f; padding: 2px 0; font-weight: bold; }}
+            .highlight-box {{ background-color: #fff3cd; padding: 15px; border: 1px solid #ffeeba; border-radius: 5px; margin-bottom: 20px; color: #856404; }}
+            a.btn {{ display: inline-block; padding: 8px 15px; background: #3498db; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px; font-family: sans-serif; font-size: 0.9em; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Visor de Evidencia</h1>
+            <h1>Visor de Trazabilidad</h1>
             
-            <h2>Claim Validado:</h2>
-            <div class="claim">"{data['claim']}"</div>
-            
-            <h2>Evidencia (Fragmento del Texto Completo):</h2>
-            <div class="snippet">
-                <p>{snippet_html.replace(r'\n', '<br><br>')}</p>
+            <div class="meta">
+                <div class="source-tag {source_class}">{source_label}</div>
+                <p><strong>Claim:</strong> "{data['claim']}"</p>
+                <p><strong>Fuente:</strong> {data['paper_title']}</p>
+                <a href="{data['pubmed_url']}" target="_blank" class="btn">Ver fuente original</a>
             </div>
-            
-            <footer>
-                <p><strong>Paper:</strong> {data['paper_title']}</p>
-                <p><strong>Enlace a PubMed:</strong> <a href="{data['pubmed_url']}" target="_blank">{data['pubmed_url']}</a></p>
-                <p>ID de Snippet: {id}</p>
-            </footer>
+
+            <div class="content">
+                {content_html}
+            </div>
         </div>
+        <script>
+            window.onload = function() {{
+                const element = document.getElementById("evidence-target");
+                if (element) {{ element.scrollIntoView({{ behavior: "smooth", block: "center" }}); }}
+            }};
+        </script>
     </body>
     </html>
     """

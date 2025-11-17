@@ -12,7 +12,7 @@ from app.agents.sources.base import BaseSourceAgent
 
 LLM_MIN_CANCEL = 0.92
 LLM_PATIENCE_MS = 1200
-GLOBAL_DEADLINE_S = 15.0 # Aumentado para dar tiempo al crawler
+GLOBAL_DEADLINE_S = 200.0 # Un poco más de margen para descargas grandes
 TOPK_RETURN = 5
 
 async def _gather_from_sources(
@@ -65,7 +65,6 @@ async def orchestrate_llm_first(
         if time.time() > global_deadline:
             break
         
-        # El Juez ahora hace RAG interno (puede tardar más)
         jr = llm_judge.decide(claim, slide_ctx, cand)
         cand.llm_judgement = jr
         cand.score = jr.score
@@ -79,7 +78,18 @@ async def orchestrate_llm_first(
             canceled_early = True
             break
 
-    # (Lógica de 'while idx < len(candidates)'... se queda igual)
+    # Rellenar si faltan candidatos
+    idx = len(judged_heap)
+    while idx < len(candidates) and idx < topk and time.time() < global_deadline:
+        cand = candidates[idx]
+        idx += 1
+        jr = llm_judge.decide(claim, slide_ctx, cand)
+        cand.llm_judgement = jr
+        cand.score = jr.score
+        cand.verdict = jr.verdict
+        heapq.heappush(judged_heap, (-cand.score, cand))
+        if best is None or cand.score > (best.score or 0.0):
+            best = cand
 
     ranked: List[RankedItem] = []
     k = 0
@@ -98,8 +108,10 @@ async def orchestrate_llm_first(
             url=cand.url,
             year=cand.year,
             journal=cand.journal,
-            # --- ¡CAMBIO! Pasamos el snippet al resultado ---
-            best_snippet=(jr.best_snippet if jr else None)
+            best_snippet=(jr.best_snippet if jr else None),
+            
+            # --- ¡NUEVO! Pasar el texto completo si existe ---
+            full_text=(cand.full_text_content if cand.full_text_content else cand.abstract)
         ))
 
     best_item = ranked[0] if ranked else None
