@@ -5,6 +5,7 @@ import os
 import re
 import httpx
 import asyncio
+from bs4 import BeautifulSoup
 
 from app.domain.core_models import Claim, CandidateDoc, SlideContext
 from app.utils.ref_extractor import extract_references
@@ -43,13 +44,13 @@ class AgentePubMed(BaseSourceAgent):
         extra_context = "hidradenitis suppurativa[Title/Abstract] OR hidradenitis supurativa[Title/Abstract]"
 
         async with (self._session or httpx.AsyncClient(timeout=30.0)) as client:
-            
+
             # --- 1. BÚSQUEDA POR ID (Prioridad Máxima) ---
             if citation_query:
                 refs = extract_references(citation_query)
                 pmids = refs.get("pmid", [])
                 dois = refs.get("doi", [])
-                
+
                 if pmids:
                     found_pmids = pmids
                 elif dois:
@@ -63,7 +64,7 @@ class AgentePubMed(BaseSourceAgent):
                 for q in queries:
                     found_pmids = await self._esearch(client, q, retmax=limit)
                     if found_pmids: break
-            
+
             # --- 3. BÚSQUEDA POR CLAIM (Fallback 2) ---
             if not found_pmids:
                 title_guess = (claim.text or "").split("\n")[0][:220]
@@ -75,77 +76,105 @@ class AgentePubMed(BaseSourceAgent):
                 for q in queries:
                     found_pmids = await self._esearch(client, q, retmax=limit)
                     if found_pmids: break
-            
+
             if not found_pmids:
-                return [] 
+                return []
 
             # --- RECUPERACIÓN DE METADATOS ---
             summaries = await self._esummary(client, found_pmids)
             abstracts = await self._efetch_abstracts(client, found_pmids)
 
-        # --- PROCESAMIENTO Y FULL TEXT (El paso lento) ---
-        cands: List[CandidateDoc] = []
-        
-        for pmid in found_pmids[:limit]:
-            meta = summaries.get(pmid, {})
-            title = meta.get("Title") or meta.get("title") or ""
-            if not title: continue
+            # --- PROCESAMIENTO Y FULL TEXT (El paso lento) ---
+            cands: List[CandidateDoc] = []
 
-            authors = [a.get("Name") or a.get("name") for a in meta.get("Authors", []) if a]
-            journal = meta.get("FullJournalName") or meta.get("Source")
-            year = None
-            try: 
-                year = int((meta.get("PubDate") or "").split()[0])
-            except Exception: 
-                pass
-            
-            url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-            abstract_text = abstracts.get(pmid, "")
-            
-            # --- ESTRATEGIA HÍBRIDA DE TEXTO COMPLETO ---
-            full_text = None
-            
-            # A. Detectar IDs disponibles
-            pmcid = None
-            doi = None
-            for article_id in meta.get("ArticleIds", []):
-                id_type = article_id.get("IdType")
-                if id_type == "pmc":
-                    pmcid = article_id.get("Value")
-                elif id_type == "doi":
-                    doi = article_id.get("Value")
+            for pmid in found_pmids[:limit]:
+                meta = summaries.get(pmid, {})
+                title = meta.get("Title") or meta.get("title") or ""
+                if not title: continue
 
-            try:
-                # B. Intentar PMC (Rápido, sin navegador)
-                if pmcid:
-                    full_text = await self.pmc_crawler.fetch_full_text(pmcid)
-                
-                # C. Si falla PMC, intentar Web del Editor (Lento, con navegador)
-                if not full_text and doi:
-                    target_url = f"https://doi.org/{doi}"
-                    # ¡IMPORTANTE! Timeout defensivo de 25s por paper.
-                    # Si el navegador se cuelga, cortamos aquí y devolvemos el abstract.
-                    full_text = await asyncio.wait_for(
-                        self.browser_crawler.fetch_full_text(target_url),
-                        timeout=25.0 
-                    )
-            except Exception as e:
-                print(f"AgentePubMed: Error/Timeout recuperando full-text para {pmid}: {e}")
-                # Fallback silencioso: full_text se queda en None (se usará el abstract)
+                authors = [a.get("Name") or a.get("name") for a in meta.get("Authors", []) if a]
+                journal = meta.get("FullJournalName") or meta.get("Source")
+                year = None
+                try:
+                    year = int((meta.get("PubDate") or "").split()[0])
+                except Exception:
+                    pass
 
-            cands.append(CandidateDoc(
-                source="pubmed",
-                id=pmid,
-                title=title,
-                authors=authors,
-                journal=journal,
-                year=year,
-                url=url,
-                abstract=abstract_text,
-                full_text_content=full_text, # Puede ser None si falló el crawler
-            ))
-            
+                url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                abstract_text = abstracts.get(pmid, "")
+
+                # --- ESTRATEGIA HÍBRIDA DE TEXTO COMPLETO ---
+                full_text = None
+
+                # A. Detectar IDs disponibles
+                pmcid = None
+                doi = None
+                for article_id in meta.get("ArticleIds", []):
+                    id_type = article_id.get("IdType")
+                    if id_type == "pmc":
+                        pmcid = article_id.get("Value")
+                    elif id_type == "doi":
+                        doi = article_id.get("Value")
+
+                try:
+                    # B. Intentar PMC (Rápido, sin navegador)
+                    if pmcid:
+                        full_text = await self.pmc_crawler.fetch_full_text(pmcid)
+
+                    # C. Si falla PMC, intentar Web del Editor (Lento, con navegador) vía DOI
+                    if not full_text and doi:
+                        target_url = f"https://doi.org/{doi}"
+                        full_text = await asyncio.wait_for(
+                            self.browser_crawler.fetch_full_text(target_url),
+                            timeout=25.0
+                        )
+
+                    # D. Último recurso: extraer el enlace "Full text" desde la página de PubMed
+                    if not full_text:
+                        fallback_url = await self._scrape_pubmed_fulltext_link(client, pmid)
+                        if fallback_url:
+                            full_text = await asyncio.wait_for(
+                                self.browser_crawler.fetch_full_text(fallback_url),
+                                timeout=25.0
+                            )
+                except Exception as e:
+                    print(f"AgentePubMed: Error/Timeout recuperando full-text para {pmid}: {e}")
+                    # Fallback silencioso: full_text se queda en None (se usará el abstract)
+
+                cands.append(CandidateDoc(
+                    source="pubmed",
+                    id=pmid,
+                    title=title,
+                    authors=authors,
+                    journal=journal,
+                    year=year,
+                    url=url,
+                    abstract=abstract_text,
+                    full_text_content=full_text, # Puede ser None si falló el crawler
+                ))
+
         return cands
+
+    async def _scrape_pubmed_fulltext_link(self, client: httpx.AsyncClient, pmid: str) -> Optional[str]:
+        page_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        try:
+            resp = await client.get(page_url, timeout=20.0)
+            resp.raise_for_status()
+        except Exception:
+            return None
+
+        try:
+            soup = BeautifulSoup(resp.text, "lxml")
+        except Exception:
+            return None
+
+        # Buscamos cualquier enlace dentro del bloque de "full text"
+        candidates = soup.select(".full-text-links-list a[href]")
+        for anchor in candidates:
+            href = (anchor.get("href") or "").strip()
+            if href:
+                return href
+        return None
 
     # --- Métodos auxiliares de la API de PubMed ---
 
