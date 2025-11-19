@@ -127,9 +127,11 @@ class PMCCrawler:
         except Exception:
             return None
 
-# Helpers de regex
+# --- ¡CORREGIDO! (Compatible con Python 3.10/3.11) ---
 def _q_title_exact(title: str) -> str:
-    return f"\"{title.replace('\"', '')}\"[Title]"
+    # Sacamos la lógica fuera del f-string para evitar backslashes
+    clean_title = title.replace('"', '')
+    return f'"{clean_title}"[Title]'
 
 def _q_title_keywords(text: str, extra: Optional[str] = None) -> str:
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\-]{3,}", text)
@@ -137,4 +139,4 @@ def _q_title_keywords(text: str, extra: Optional[str] = None) -> str:
     q = f"({core})[Title/Abstract]"
     if extra:
         q += f" AND ({extra})"
-    return q
+    return q   

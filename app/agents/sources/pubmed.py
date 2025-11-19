@@ -22,7 +22,7 @@ NCBI_API_KEY = os.getenv("NCBI_API_KEY")
 
 class AgentePubMed(BaseSourceAgent):
     name = "pubmed"
-    timeout_default = 120.0 # Damos margen global amplio
+    timeout_default = 120.0 
 
     def __init__(self, session: Optional[httpx.AsyncClient] = None):
         self._session = session
@@ -45,8 +45,10 @@ class AgentePubMed(BaseSourceAgent):
                 refs = extract_references(citation_query)
                 pmids = refs.get("pmid", [])
                 dois = refs.get("doi", [])
-                if pmids: found_pmids = pmids
-                elif dois: found_pmids = await self._esearch(client, dois[0], retmax=limit)
+                if pmids:
+                    found_pmids = pmids
+                elif dois:
+                    found_pmids = await self._esearch(client, dois[0], retmax=limit)
 
             if not found_pmids and citation_query:
                 queries = [_q_title_keywords(citation_query, extra=extra_context)]
@@ -87,32 +89,28 @@ class AgentePubMed(BaseSourceAgent):
             
             full_text = None
             pmcid = None
-            doi = None
+            # Buscamos PMCID
             for article_id in meta.get("ArticleIds", []):
-                id_type = article_id.get("IdType")
-                if id_type == "pmc":
+                if article_id.get("IdType") == "pmc":
                     pmcid = article_id.get("Value")
-                elif id_type == "doi":
-                    doi = article_id.get("Value")
+                    break
 
             try:
                 # 1. Intentar PMC (Rápido)
                 if pmcid:
                     full_text = await self.pmc_crawler.fetch_full_text(pmcid)
                 
-                # 2. Si falla, Crawler Browser (Lento)
-                if not full_text and doi:
-                    target_url = f"https://doi.org/{doi}"
+                # 2. Si falla PMC, ESTRATEGIA "HUMANA" VÍA PUBMED
+                # Usamos la URL de PubMed para que el crawler haga clic en "Full Text"
+                if not full_text:
+                    target_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                     
-                    print(f"[DEBUG] Lanzando Crawler para {target_url} (Timeout: 90s)...")
+                    print(f"[DEBUG] Lanzando BrowserCrawler (Estrategia Click) a: {target_url}")
                     
-                    # --- ¡CAMBIO CRÍTICO! Subimos a 90 segundos ---
                     full_text = await asyncio.wait_for(
                         self.browser_crawler.fetch_full_text(target_url),
                         timeout=90.0 
                     )
-                    # ----------------------------------------------
-
             except Exception as e:
                 print(f"AgentePubMed: Error/Timeout recuperando full-text para {pmid}: {e}")
 

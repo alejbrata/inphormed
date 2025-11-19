@@ -1,16 +1,36 @@
 version: "3.9"
 services:
+  # --- EL CEREBRO (API + Crawler) ---
   inphormed-api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     volumes:
       - .:/code
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
+      # ... añade aquí el resto de tus claves si las tienes en .env ...
+    depends_on:
+      - qdrant
+
+  # --- LA CARA (Frontend Streamlit) ---
+  inphormed-ui:
+    build: .
+    # Le decimos que arranque Streamlit en vez de Uvicorn
+    command: streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/code
+    environment:
+      # ¡Importante! El frontend habla con el backend usando el nombre del servicio docker
+      - BACKEND_URL=http://inphormed-api:8000
+    depends_on:
+      - inphormed-api
+
+  # --- LA MEMORIA (Base de Datos) ---
   qdrant:
     image: qdrant/qdrant
     ports:
