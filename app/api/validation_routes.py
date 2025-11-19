@@ -64,9 +64,6 @@ def _extract_pairs_with_llm(
     slide_index: int, 
     llm_service: LLMService
 ) -> List[Dict[str, Any]]:
-    """
-    Usa un LLM (vía LLMService) para extraer pares (claim, cita).
-    """
     try:
         user_prompt = (
             f"Texto de la Diapositiva {slide_index}:\n\n---\n{slide_text}\n---\n\n"
@@ -217,21 +214,23 @@ async def validate_pptx_llm_first(
                     "timings_ms": orch.timings_ms,
                 }
                 
-                # --- ¡CAMBIO! Guardar texto completo en caché ---
-                if best_snippet and orch.best.id:
+                # --- ¡CAMBIO CLAVE! Guardar en caché SIEMPRE que haya candidato ---
+                # (Incluso si no hay snippet/evidencia encontrada)
+                if orch.best.id:
                     snippet_id = f"pmid_{orch.best.id}_slide_{slide_idx}"
-                    full_text_to_show = orch.best.full_text or best_snippet # Fallback al snippet si no hay fulltext
+                    # Preferimos full_text, si no abstract, si no un aviso
+                    full_text_to_show = orch.best.full_text or orch.best.abstract or "Texto no recuperado."
                     
                     SNIPPET_CACHE[snippet_id] = {
                         "claim": claim_text,
-                        "snippet": best_snippet,
+                        "snippet": best_snippet or "(No se encontró evidencia específica en el texto)",
                         "full_text": full_text_to_show,
                         "paper_title": best_title,
                         "pubmed_url": best_url
                     }
-                    # Actualizar URL para el anotador
+                    # Forzamos que el link del PPTX vaya a nuestro visor
                     best_url = f"/api/viewer?id={snippet_id}"
-                # ------------------------------------------------
+                # -----------------------------------------------------------------
 
             else:
                 color = "red"
@@ -249,15 +248,17 @@ async def validate_pptx_llm_first(
             
             results.append(api_result)
             
+            # Preparamos el hallazgo para el PPTX
             findings_for_annotation.append({
                 "slide": slide_idx,
                 "color": color,
                 "claim": claim_text,
-                "source_url": best_url, # Ya es el link al visor
+                "source_url": best_url, # Ahora siempre apunta al visor si hay candidato
                 "snippet_url": None,
                 "ref_raw": best_title[:100], 
                 "score": api_result["best_score"],
-                "source_excerpt": best_snippet[:300] if best_snippet else "",
+                # Si no hay snippet, ponemos el veredicto como excerpt
+                "source_excerpt": (best_snippet or api_result["best_verdict"])[:300],
             })
 
         payload: Dict[str, Any] = {
@@ -272,7 +273,6 @@ async def validate_pptx_llm_first(
                 annotated_bytes = annotate_pptx(tmp_path, out_path, findings_for_annotation)
                 payload["annotated_pptx_b64"] = base64.b64encode(annotated_bytes).decode("utf-8")
                 payload["annotated_file_name"] = file_name.replace(".pptx", "_validated.pptx")
-            
             except Exception as e_annotate:
                 print(f"Error annotating PPTX: {e_annotate}")
                 payload["annotated_pptx_b64"] = None
@@ -311,8 +311,6 @@ async def validate_claim_llm_first(
     )
     return result
 
-# --- ¡EL VISOR WOW! ---
-# En app/api/validation_routes.py
 
 @router.get("/viewer", response_class=HTMLResponse)
 async def get_snippet_viewer(id: str = Query(..., description="ID del snippet cacheado")):
@@ -323,19 +321,16 @@ async def get_snippet_viewer(id: str = Query(..., description="ID del snippet ca
     full_text = data.get("full_text", "")
     snippet = data.get("snippet", "")
     
-    # --- DETECCIÓN DE TIPO DE TEXTO ---
-    # Si el texto es muy corto (<3000 chars), probablemente sea solo el abstract
     is_abstract_only = len(full_text) < 3000
     source_label = "⚠️ ABSTRACT (Texto completo no disponible)" if is_abstract_only else "📄 TEXTO COMPLETO (Extraído)"
     source_class = "warning" if is_abstract_only else "success"
-    # ----------------------------------
 
-    # Lógica de resaltado (igual que antes)
     if snippet and snippet in full_text:
         highlighted_snippet = f'<span id="evidence-target" class="highlight">{snippet}</span>'
         content_html = full_text.replace(snippet, highlighted_snippet)
     else:
-        content_html = f'<div class="highlight-box"><strong>Evidencia (Snippet del Juez):</strong><br>{snippet}</div><hr>{full_text}'
+        # Si no hay snippet o no coincide, mostramos aviso
+        content_html = f'<div class="highlight-box"><strong>Estado de evidencia:</strong><br>{snippet}</div><hr>{full_text}'
 
     content_html = content_html.replace("\n", "<br>")
 
@@ -350,12 +345,9 @@ async def get_snippet_viewer(id: str = Query(..., description="ID del snippet ca
             .container {{ max-width: 800px; margin: 40px auto; padding: 40px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
             h1 {{ font-family: "Segoe UI", sans-serif; color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
             .meta {{ background: #f0f4f8; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #3498db; }}
-            
-            /* Etiqueta de tipo de fuente */
             .source-tag {{ display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-family: sans-serif; font-size: 0.8em; margin-bottom: 10px; }}
             .source-tag.warning {{ background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
             .source-tag.success {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-
             .highlight {{ background-color: #fffacd; border-bottom: 2px solid #f1c40f; padding: 2px 0; font-weight: bold; }}
             .highlight-box {{ background-color: #fff3cd; padding: 15px; border: 1px solid #ffeeba; border-radius: 5px; margin-bottom: 20px; color: #856404; }}
             a.btn {{ display: inline-block; padding: 8px 15px; background: #3498db; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px; font-family: sans-serif; font-size: 0.9em; }}
@@ -364,17 +356,13 @@ async def get_snippet_viewer(id: str = Query(..., description="ID del snippet ca
     <body>
         <div class="container">
             <h1>Visor de Trazabilidad</h1>
-            
             <div class="meta">
                 <div class="source-tag {source_class}">{source_label}</div>
                 <p><strong>Claim:</strong> "{data['claim']}"</p>
                 <p><strong>Fuente:</strong> {data['paper_title']}</p>
                 <a href="{data['pubmed_url']}" target="_blank" class="btn">Ver fuente original</a>
             </div>
-
-            <div class="content">
-                {content_html}
-            </div>
+            <div class="content">{content_html}</div>
         </div>
         <script>
             window.onload = function() {{
