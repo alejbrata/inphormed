@@ -15,18 +15,20 @@ services:
     depends_on:
       - qdrant
 
-  # --- LA CARA (Frontend Streamlit) ---
+  # --- LA CARA (Frontend Next.js) ---
   inphormed-ui:
-    build: .
-    # Le decimos que arranque Streamlit en vez de Uvicorn
-    command: streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    working_dir: /code/frontend
+    command: npm run dev
     ports:
-      - "8501:8501"
+      - "3000:3000"
     volumes:
-      - .:/code
+      - ./frontend:/code/frontend
+      - /code/frontend/node_modules
     environment:
-      # ¡Importante! El frontend habla con el backend usando el nombre del servicio docker
-      - BACKEND_URL=http://inphormed-api:8000
+      - NEXT_PUBLIC_BACKEND_URL=http://inphormed-api:8000
     depends_on:
       - inphormed-api
 

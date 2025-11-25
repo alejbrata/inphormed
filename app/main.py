@@ -1,20 +1,17 @@
 # app/main.py
-from __future__ import annotations # <--- Esta línea SIEMPRE debe ir la primera
+from __future__ import annotations 
 import sys
 import asyncio
 from dotenv import load_dotenv
 from fastapi import FastAPI
+# --- IMPORTACIÓN NUEVA ---
+from fastapi.middleware.cors import CORSMiddleware
 
-# --- ¡PARCHE CRÍTICO PARA WINDOWS! ---
-# Forzar Proactor para que Playwright funcione con uvicorn reload
+# Parche Windows (Lo mantenemos por seguridad)
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-# -------------------------------------
 
-# 1. Importamos el NUEVO router unificado
 from app.api.validation_routes import router as validation_router
-
-# 2. (Mantenemos los otros routers)
 from app.routes.chat_routes import router as chat_router
 from app.routes.ui_routes import router as ui_router
 
@@ -23,7 +20,16 @@ load_dotenv()
 def create_app() -> FastAPI:
     app = FastAPI(title="Inphormed — LLM-first Claims Validator")
     
-    # Endpoints
+    # --- ¡HABILITAR CORS! (La puerta abierta para tu nuevo Front) ---
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # En producción se pone el dominio real, para dev "*" es perfecto
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    # --------------------------------------------------------------
+    
     app.include_router(validation_router)
     app.include_router(chat_router)
     app.include_router(ui_router)
