@@ -1,10 +1,15 @@
 // API Service for communicating with FastAPI backend
 import axios, { AxiosInstance } from 'axios';
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+// Fix: Browser needs localhost, Server needs docker internal URL
+const getBaseUrl = () => {
+    if (typeof window !== 'undefined') {
+        return 'http://localhost:8000';
+    }
+    return process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+};
 
-// Use relative URL on client side to leverage Next.js rewrites (avoids CORS)
-const baseURL = typeof window !== 'undefined' ? '' : BACKEND_URL;
+const baseURL = getBaseUrl();
 
 const apiClient: AxiosInstance = axios.create({
     baseURL: baseURL,
