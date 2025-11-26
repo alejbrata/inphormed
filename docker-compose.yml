@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   # --- EL CEREBRO (API + Crawler) ---
   inphormed-api:

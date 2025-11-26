@@ -5,11 +5,13 @@ import ClaimsValidator from '@/components/ClaimsValidator';
 import MaterialGenerator from '@/components/MaterialGenerator';
 import ChatCopilot from '@/components/ChatCopilot';
 import { Pill, FileText, LayoutGrid } from 'lucide-react';
+import { type PPTXValidationResponse } from '@/lib/api';
 
 type Page = 'validator' | 'generator';
 
 export default function Home() {
   const [currentPage, setCurrentPage] = useState<Page>('validator');
+  const [validationResults, setValidationResults] = useState<PPTXValidationResponse | null>(null);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-700">
@@ -67,7 +69,7 @@ export default function Home() {
       <main className="max-w-7xl mx-auto px-6 py-8">
         {currentPage === 'validator' && (
           <div className="animate-fade-in">
-            <ClaimsValidator />
+            <ClaimsValidator onValidationComplete={setValidationResults} />
           </div>
         )}
         {currentPage === 'generator' && (
@@ -78,7 +80,7 @@ export default function Home() {
       </main>
 
       {/* Floating Chat Copilot */}
-      <ChatCopilot context={currentPage} />
+      <ChatCopilot context={currentPage} validationContext={validationResults} />
 
     </div>
   );

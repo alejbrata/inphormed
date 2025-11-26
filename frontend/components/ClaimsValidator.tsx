@@ -5,10 +5,14 @@ import { validatePPTX, downloadBase64File, type PPTXValidationResponse } from '@
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     UploadCloud, FileText, CheckCircle2, AlertTriangle, XCircle,
-    Download, Search, ArrowRight, FileType, Microscope, Sliders
+    Download, Search, ArrowRight, FileType, Microscope, Sliders, Sparkles
 } from 'lucide-react';
 
-export default function ClaimsValidator() {
+interface ClaimsValidatorProps {
+    onValidationComplete?: (results: PPTXValidationResponse) => void;
+}
+
+export default function ClaimsValidator({ onValidationComplete }: ClaimsValidatorProps) {
     const [activeTab, setActiveTab] = useState<'pptx' | 'text'>('pptx');
     const [file, setFile] = useState<File | null>(null);
     const [topk, setTopk] = useState(8);
@@ -57,6 +61,9 @@ export default function ClaimsValidator() {
         try {
             const data = await validatePPTX(file, topk, thrGreen, thrYellow, true);
             setResults(data);
+            if (onValidationComplete) {
+                onValidationComplete(data);
+            }
         } catch (err: any) {
             setError(err.response?.data?.detail || err.message || 'Error al validar el PPTX');
         } finally {
@@ -104,8 +111,8 @@ export default function ClaimsValidator() {
                     <button
                         onClick={() => setActiveTab('pptx')}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'pptx'
-                                ? 'bg-indigo-50 text-indigo-700 shadow-sm'
-                                : 'text-slate-500 hover:text-slate-700'
+                            ? 'bg-indigo-50 text-indigo-700 shadow-sm'
+                            : 'text-slate-500 hover:text-slate-700'
                             }`}
                     >
                         Presentation
@@ -113,8 +120,8 @@ export default function ClaimsValidator() {
                     <button
                         onClick={() => setActiveTab('text')}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'text'
-                                ? 'bg-indigo-50 text-indigo-700 shadow-sm'
-                                : 'text-slate-500 hover:text-slate-700'
+                            ? 'bg-indigo-50 text-indigo-700 shadow-sm'
+                            : 'text-slate-500 hover:text-slate-700'
                             }`}
                     >
                         Text Analysis
@@ -293,7 +300,7 @@ export default function ClaimsValidator() {
                                                                 'bg-red-50 text-red-700 border-red-200'}
                                                     `}>
                                                         <span className={`w-1.5 h-1.5 rounded-full ${result.status === 'green' ? 'bg-teal-500' :
-                                                                result.status === 'yellow' ? 'bg-yellow-500' : 'bg-red-500'
+                                                            result.status === 'yellow' ? 'bg-yellow-500' : 'bg-red-500'
                                                             }`} />
                                                         {result.status.toUpperCase()}
                                                     </span>
@@ -307,7 +314,7 @@ export default function ClaimsValidator() {
                                                     <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
                                                         <div
                                                             className={`h-full rounded-full ${result.status === 'green' ? 'bg-teal-500' :
-                                                                    result.status === 'yellow' ? 'bg-yellow-500' : 'bg-red-500'
+                                                                result.status === 'yellow' ? 'bg-yellow-500' : 'bg-red-500'
                                                                 }`}
                                                             style={{ width: `${result.best_score * 100}%` }}
                                                         />
@@ -330,7 +337,7 @@ export default function ClaimsValidator() {
                                                     {result.best_url ? (
                                                         <>
                                                             <p className="text-sm text-slate-600 mb-3 line-clamp-3 italic">
-                                                                "{result.best_snippet || result.best_verdict}"
+                                                                "{result.best_verdict}"
                                                             </p>
                                                             <div className="flex items-center justify-between pt-2 border-t border-slate-200/60">
                                                                 <span className="text-xs text-slate-500 truncate max-w-[200px]" title={result.best_title}>
@@ -358,13 +365,5 @@ export default function ClaimsValidator() {
                 </div>
             </div>
         </div>
-    );
-}
-
-function Sparkles({ className }: { className?: string }) {
-    return (
-        <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
-        </svg>
     );
 }

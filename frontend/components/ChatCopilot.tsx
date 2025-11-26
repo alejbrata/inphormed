@@ -1,22 +1,30 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { sendChatMessage, type Message } from '@/lib/api';
+import { sendChatMessage, type Message, type PPTXValidationResponse } from '@/lib/api';
 import { MessageCircle, X, Send, Bot, User, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface ChatCopilotProps {
     context: 'validator' | 'generator';
     initialOpen?: boolean;
+    validationContext?: PPTXValidationResponse | null;
 }
 
-export default function ChatCopilot({ context, initialOpen = false }: ChatCopilotProps) {
+export default function ChatCopilot({ context, initialOpen = false, validationContext }: ChatCopilotProps) {
     const [isOpen, setIsOpen] = useState(initialOpen);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
     const [hasNewMessage, setHasNewMessage] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    // Effect to notify user when context is available
+    useEffect(() => {
+        if (validationContext && messages.length === 0) {
+            setHasNewMessage(true);
+        }
+    }, [validationContext]);
 
     const contextTitles = {
         validator: 'Medical Copilot',
@@ -48,6 +56,28 @@ export default function ChatCopilot({ context, initialOpen = false }: ChatCopilo
         }
     }, [isOpen]);
 
+    const formatValidationContext = (data: PPTXValidationResponse): string => {
+        let ctx = `CONTEXTO DEL ANÁLISIS DE VALIDACIÓN:\n`;
+        ctx += `Archivo: ${data.file_name}\n`;
+        ctx += `Total Claims: ${data.total_claims}\n\n`;
+        ctx += `RESULTADOS DETALLADOS:\n`;
+
+        data.results.forEach((r, i) => {
+            ctx += `--- Claim ${i + 1} (${r.where}) ---\n`;
+            ctx += `Texto: "${r.text}"\n`;
+            ctx += `Estado: ${r.status.toUpperCase()} (Score: ${r.best_score.toFixed(2)})\n`;
+            if (r.best_url) {
+                ctx += `Evidencia: "${r.best_verdict}"\n`;
+                ctx += `Fuente: ${r.best_title}\n`;
+            } else {
+                ctx += `Evidencia: No encontrada o insuficiente.\n`;
+            }
+            ctx += `\n`;
+        });
+
+        return ctx;
+    };
+
     const handleSend = async () => {
         if (!input.trim() || loading) return;
 
@@ -60,7 +90,20 @@ export default function ChatCopilot({ context, initialOpen = false }: ChatCopilo
         setInput('');
         setLoading(true);
 
-        const apiMessages = [...messages, userMessage];
+        // Prepare messages for API
+        let apiMessages = [...messages, userMessage];
+
+        // Inject context if available and not already present
+        if (validationContext) {
+            const contextString = formatValidationContext(validationContext);
+            const systemMessage: Message = {
+                role: 'system',
+                content: `Eres un asistente médico experto. Usa el siguiente contexto de validación para responder preguntas sobre la presentación analizada. Si te preguntan por una slide específica, busca en el contexto.\n\n${contextString}`
+            };
+
+            // Prepend system message
+            apiMessages = [systemMessage, ...apiMessages];
+        }
 
         try {
             const response = await sendChatMessage({
