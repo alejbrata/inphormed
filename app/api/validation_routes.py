@@ -230,6 +230,8 @@ async def validate_pptx_llm_first(
                     }
                     # Forzamos que el link del PPTX vaya a nuestro visor
                     best_url = f"/api/viewer?id={snippet_id}"
+                    # Actualizamos también el resultado de la API para que el frontend use el link interno
+                    api_result["best_url"] = best_url
                 # -----------------------------------------------------------------
 
             else:
