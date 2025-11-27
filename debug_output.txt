@@ -1,0 +1,42 @@
+Traceback (most recent call last):
+  File "/code/app/agents/sources/browser_crawler.py", line 50, in fetch_full_text
+    browser = await p.chromium.launch(
+  File "/usr/local/lib/python3.10/dist-packages/playwright/async_api/_generated.py", line 14495, in launch
+    await self._impl_obj.launch(
+  File "/usr/local/lib/python3.10/dist-packages/playwright/_impl/_browser_type.py", line 98, in launch
+    await self._channel.send(
+  File "/usr/local/lib/python3.10/dist-packages/playwright/_impl/_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+  File "/usr/local/lib/python3.10/dist-packages/playwright/_impl/_connection.py", line 559, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.Error: BrowserType.launch: Executable doesn't exist at /ms-playwright/chromium_headless_shell-1194/chrome-linux/headless_shell
+╔═══════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just updated to 1.56.0.             ║
+║ Please update docker image as well.                           ║
+║ -  current: mcr.microsoft.com/playwright/python:v1.48.0-jammy ║
+║ - required: mcr.microsoft.com/playwright/python:v1.56.0-jammy ║
+║                                                               ║
+║ <3 Playwright Team                                            ║
+╚═══════════════════════════════════════════════════════════════╝
+[CRAWLER] INIT: Playwright listo.
+Fetching https://example.com...
+[CRAWLER] START: Iniciando misión para https://example.com
+[CRAWLER] CRASH: BrowserType.launch: Executable doesn't exist at /ms-playwright/chromium_headless_shell-1194/chrome-linux/headless_shell
+╔═══════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just updated to 1.56.0.             ║
+║ Please update docker image as well.                           ║
+║ -  current: mcr.microsoft.com/playwright/python:v1.48.0-jammy ║
+║ - required: mcr.microsoft.com/playwright/python:v1.56.0-jammy ║
+║                                                               ║
+║ <3 Playwright Team                                            ║
+╚═══════════════════════════════════════════════════════════════╝
+DEBUG CRASH: BrowserType.launch: Executable doesn't exist at /ms-playwright/chromium_headless_shell-1194/chrome-linux/headless_shell
+╔═══════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just updated to 1.56.0.             ║
+║ Please update docker image as well.                           ║
+║ -  current: mcr.microsoft.com/playwright/python:v1.48.0-jammy ║
+║ - required: mcr.microsoft.com/playwright/python:v1.56.0-jammy ║
+║                                                               ║
+║ <3 Playwright Team                                            ║
+╚═══════════════════════════════════════════════════════════════╝
+Result length: None

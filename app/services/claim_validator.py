@@ -1,12 +1,14 @@
 # app/services/claim_validator.py  — reemplazo completo (web-first + LLM scoring)
 from __future__ import annotations
 
-import os, json, re
+import os, json, re, asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # HTTP
 import requests
+# Usamos el Crawler robusto que ya existía
+from app.agents.sources.browser_crawler import BrowserCrawler
 
 # ─────────────────────────────────────────────────────────────
 # Utilidades
@@ -38,6 +40,19 @@ def _dedupe_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _strip(s: Optional[str]) -> str:
     return (s or "").strip()
+
+async def _fetch_full_text(url: str) -> Optional[str]:
+    """Intenta descargar el texto completo usando el Crawler robusto (Playwright)."""
+    if not url: return None
+    try:
+        crawler = BrowserCrawler()
+        text = await crawler.fetch_full_text(url)
+        if text and len(text) > 200:
+            return text
+        return None
+    except Exception as e:
+        print(f"Error fetching full text for {url}: {e}")
+        return None
 
 # ─────────────────────────────────────────────────────────────
 # Búsqueda web en 3 fuentes (EuropePMC, PubMed, Crossref)
@@ -171,7 +186,7 @@ def _get_openai_client():
         return OpenAI(api_key=key)
 
 _LLM_SYSTEM = (
-    "Eres un verificador científico. Toma un CLAIM y un posible estudio (título + resumen) "
+    "Eres un verificador científico. Toma un CLAIM y un posible estudio (título + texto/resumen) "
     "y evalúa QUÉ TAN BIEN lo respalda, devolviendo solo un número entre 0.0 y 1.0.\n"
     "0.0 = no guarda relación / lo contradice; 0.5 = relación débil/indirecta; 1.0 = lo respalda claramente.\n"
     "Si el texto del estudio es insuficiente, devuelve ≤ 0.4."
@@ -179,14 +194,16 @@ _LLM_SYSTEM = (
 
 _LLM_USER_TMPL = (
     "CLAIM:\n{claim}\n\n"
-    "ESTUDIO (título + resumen):\n{title}\n{abstract}\n\n"
+    "ESTUDIO (título + texto):\n{title}\n{text}\n\n"
     "Responde solo el número (0..1), con máximo 3 decimales."
 )
 
-def _score_llm(claim: str, title: str, abstract: str, model: str) -> float:
+def _score_llm(claim: str, title: str, text: str, model: str) -> float:
     client = _get_openai_client()
     try:
-        user = _LLM_USER_TMPL.format(claim=claim, title=title or "(sin título)", abstract=abstract or "(sin resumen)")
+        # Truncar texto si es muy largo para evitar errores de contexto (aunque gpt-4o aguanta mucho)
+        safe_text = (text or "")[:25000] # Aumentamos el límite ya que ahora traemos full text real
+        user = _LLM_USER_TMPL.format(claim=claim, title=title or "(sin título)", text=safe_text or "(sin texto)")
         resp = client.chat.completions.create(
             model=model,
             temperature=0.0,
@@ -224,7 +241,7 @@ class ClaimValidatorService:
     thr_yellow: float = 0.70
     llm_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    def validate(self, claim: str) -> Dict[str, Any]:
+    async def validate(self, claim: str) -> Dict[str, Any]:
         claim = (claim or "").strip()
         if not claim:
             return {"status": "red", "best_score": 0.0, "hits": []}
@@ -235,16 +252,29 @@ class ClaimValidatorService:
         # 2) Puntuación (LLM si hay clave; si no, solapamiento)
         scored: List[Dict[str, Any]] = []
         use_llm = bool(os.getenv("OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY"))
+        
         for h in hits:
-            title, abstract = _strip(h.get("title")), _strip(h.get("text"))
-            score = _score_llm(claim, title, abstract, self.llm_model) if use_llm else _score_fallback_overlap(claim, title, abstract)
+            title = _strip(h.get("title"))
+            text_content = _strip(h.get("text"))
+            url = h.get("url")
+            
+            # INTENTO DE RECUPERAR FULL TEXT SI HAY URL
+            # Usamos el crawler robusto (Playwright)
+            if url: 
+                full_text = await _fetch_full_text(url)
+                if full_text:
+                    text_content = full_text
+                    h["text"] = full_text 
+
+            score = _score_llm(claim, title, text_content, self.llm_model) if use_llm else _score_fallback_overlap(claim, title, text_content)
+            
             scored.append({
                 "source": h.get("source"),
                 "pmid": h.get("pmid"),
                 "doi": h.get("doi"),
-                "url": h.get("url"),
+                "url": url,
                 "title": title,
-                "text": abstract,
+                "text": text_content, # Esto ahora puede ser full text
                 "year": h.get("year"),
                 "score": float(round(score, 3)),
             })

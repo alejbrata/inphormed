@@ -12,6 +12,10 @@ from app.services.claim_validator import ClaimValidatorService
 # --- NUEVO: validar un claim de texto libre ---
 from hashlib import sha256 as _sha
 
+# Compliance (Re-integrated)
+from app.compliance.engine import ComplianceEngine
+from app.schemas import Citation
+
 router = APIRouter()
 
 # --------- Config vía ENV (fallbacks sensatos) ----------
@@ -46,6 +50,9 @@ class ClaimResult(BaseModel):
     status: str
     best_score: float
     hits: List[ClaimHit]
+    # Compliance fields
+    compliance_status: Optional[str] = None
+    compliance_reason: Optional[str] = None
 
 class ValidatePptResponse(BaseModel):
     file_name: str
@@ -56,11 +63,15 @@ class ValidatePptResponse(BaseModel):
 # --------- Dependencias para inyectar servicios ----------
 def get_validator() -> ClaimValidatorService:
     if not _QDRANT_URL:
-        raise RuntimeError("QDRANT_URL no configurado")
-    store = QdrantStore(url=_QDRANT_URL, api_key=_QDRANT_KEY, collection=_EVID_COLL, dim=_EMBED_DIM)
-    repo  = EvidenceRepository(store=store, embedder=EmbedderMiniLM())
-    repo.ensure_ready()
-    return ClaimValidatorService(evidence=repo, topk=_RAG_TOPK, thr_green=_THR_GREEN, thr_yellow=_THR_YELLOW)
+        # Fallback si no hay Qdrant, aunque ClaimValidatorService actual es web-first
+        pass 
+    # store = QdrantStore(url=_QDRANT_URL, api_key=_QDRANT_KEY, collection=_EVID_COLL, dim=_EMBED_DIM)
+    # repo  = EvidenceRepository(store=store, embedder=EmbedderMiniLM())
+    # repo.ensure_ready()
+    # return ClaimValidatorService(evidence=repo, topk=_RAG_TOPK, thr_green=_THR_GREEN, thr_yellow=_THR_YELLOW)
+    
+    # Usamos la versión web-first directa
+    return ClaimValidatorService(topk=_RAG_TOPK, thr_green=_THR_GREEN, thr_yellow=_THR_YELLOW)
 
 # --------- Endpoint: subir PPT y validar claims ----------
 @router.post("/validate-ppt", response_model=ValidatePptResponse, tags=["claims"])
@@ -86,8 +97,31 @@ async def validate_ppt(
     validator.thr_green = params.thr_green
     validator.thr_yellow = params.thr_yellow
 
+    # Instanciamos Compliance Engine
+    comp_engine = ComplianceEngine()
+
     for c in claims:
-        res = validator.validate(c["text"])
+        # AWAIT HERE
+        res = await validator.validate(c["text"])
+        
+        # Compliance Check
+        citations = [
+            Citation(
+                source=h.get("source"),
+                url=h.get("url"),
+                title=h.get("title"),
+                score=h.get("score")
+            ) for h in res["hits"]
+        ]
+        
+        comp_report = comp_engine.run_checks(claim=c["text"], citations=citations)
+        compliance_status = "pass" if comp_report.passed else "fail"
+        compliance_reason = None
+        if not comp_report.passed and comp_report.issues:
+            # Tomamos el primer fallo o concatenamos
+            failures = [i.reason for i in comp_report.issues if not i.passed]
+            compliance_reason = "; ".join(failures) if failures else "Compliance check failed"
+
         results.append({
             "where": c["where"],
             "text": c["text"],
@@ -95,6 +129,8 @@ async def validate_ppt(
             "status": res["status"],
             "best_score": res["best_score"],
             "hits": res["hits"],
+            "compliance_status": compliance_status,
+            "compliance_reason": compliance_reason,
         })
 
     return {
@@ -119,17 +155,38 @@ class ValidateTextResponse(BaseModel):
     status: str
     best_score: float
     hits: list[ClaimHit]
+    compliance_status: Optional[str] = None
+    compliance_reason: Optional[str] = None
 
 def _sha16(s: str) -> str:
     return _sha(s.encode("utf-8")).hexdigest()[:16]
 
 @router.post("/validate-text", response_model=ValidateTextResponse, tags=["claims"])
-def validate_text(req: ValidateTextRequest, validator: ClaimValidatorService = Depends(get_validator)):
+async def validate_text(req: ValidateTextRequest, validator: ClaimValidatorService = Depends(get_validator)):
     validator.topk = req.topk
     validator.thr_green = req.thr_green
     validator.thr_yellow = req.thr_yellow
 
-    res = validator.validate(req.text)
+    # AWAIT HERE
+    res = await validator.validate(req.text)
+    
+    # Compliance Check (también para texto libre)
+    comp_engine = ComplianceEngine()
+    citations = [
+        Citation(
+            source=h.get("source"),
+            url=h.get("url"),
+            title=h.get("title"),
+            score=h.get("score")
+        ) for h in res["hits"]
+    ]
+    comp_report = comp_engine.run_checks(claim=req.text, citations=citations)
+    compliance_status = "pass" if comp_report.passed else "fail"
+    compliance_reason = None
+    if not comp_report.passed and comp_report.issues:
+        failures = [i.reason for i in comp_report.issues if not i.passed]
+        compliance_reason = "; ".join(failures) if failures else "Compliance check failed"
+
     return ValidateTextResponse(
         where="text",
         text=req.text,
@@ -137,4 +194,6 @@ def validate_text(req: ValidateTextRequest, validator: ClaimValidatorService = D
         status=res["status"],
         best_score=res["best_score"],
         hits=[ClaimHit(**h) for h in res["hits"]],
+        compliance_status=compliance_status,
+        compliance_reason=compliance_reason,
     )
