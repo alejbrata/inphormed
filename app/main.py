@@ -4,7 +4,6 @@ import sys
 import asyncio
 from dotenv import load_dotenv
 from fastapi import FastAPI
-# --- IMPORTACIÓN NUEVA ---
 from fastapi.middleware.cors import CORSMiddleware
 
 # Parche Windows (Lo mantenemos por seguridad)
@@ -12,6 +11,7 @@ if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from app.api.validation_routes import router as validation_router
+from app.api.generation_routes import router as generation_router
 from app.routes.chat_routes import router as chat_router
 from app.routes.ui_routes import router as ui_router
 
@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
     # --------------------------------------------------------------
     
     app.include_router(validation_router)
+    app.include_router(generation_router)
     app.include_router(chat_router)
     app.include_router(ui_router)
     

@@ -130,4 +130,72 @@ export const downloadBase64File = (base64: string, filename: string, mimeType: s
     window.URL.revokeObjectURL(url);
 };
 
+export interface PodcastResponse {
+    script: Array<{ speaker: string; text: string }>;
+    audio_base64: string;
+    file_name: string;
+}
+
+// Podcast generation endpoint
+export const generatePodcast = async (file: File): Promise<PodcastResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await apiClient.post<PodcastResponse>(
+        '/api/generate/podcast',
+        formData,
+        {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+            timeout: 300000, // 5 minutes for generation
+        }
+    );
+
+    return response.data;
+};
+
+export interface SummaryResponse {
+    summary: string;
+    file_name: string;
+}
+
+export const generateSummary = async (file: File): Promise<SummaryResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await apiClient.post<SummaryResponse>(
+        '/api/generate/summary',
+        formData,
+        {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+            timeout: 300000,
+        }
+    );
+
+    return response.data;
+};
+
+export const generateSlides = async (text: string | null, file: File | null, numSlides: number = 5): Promise<Blob> => {
+    const formData = new FormData();
+    if (text) formData.append('text', text);
+    if (file) formData.append('file', file);
+    formData.append('num_slides', numSlides.toString());
+
+    const response = await apiClient.post(
+        '/api/generate/slides',
+        formData,
+        {
+            responseType: 'blob', // Importante para recibir archivos binarios
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+            timeout: 300000,
+        }
+    );
+    return response.data;
+};
+
 export default apiClient;
