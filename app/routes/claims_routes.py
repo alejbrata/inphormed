@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from pydantic import BaseModel, Field
 import os
+import uuid
 
 from app.services.claim_extractor import extract_claims_from_pptx
 from app.vector.qdrant_store import QdrantStore
@@ -15,6 +16,9 @@ from hashlib import sha256 as _sha
 # Compliance (Re-integrated)
 from app.compliance.engine import ComplianceEngine
 from app.schemas import Citation
+
+# Importamos la caché compartida para el Viewer
+from app.api.validation_routes import SNIPPET_CACHE
 
 router = APIRouter()
 
@@ -104,6 +108,24 @@ async def validate_ppt(
         # AWAIT HERE
         res = await validator.validate(c["text"])
         
+        # --- CACHE LOGIC FOR VIEWER ---
+        # Si hay hits, tomamos el mejor (el primero) y lo guardamos en caché para el viewer
+        if res["hits"]:
+            best_hit = res["hits"][0]
+            # Generamos un ID único para este snippet
+            snippet_id = f"claim_{c.get('claim_id', uuid.uuid4().hex)}"
+            
+            SNIPPET_CACHE[snippet_id] = {
+                "claim": c["text"],
+                "snippet": (best_hit.get("text") or "")[:500] + "...", # Snippet corto para display
+                "full_text": best_hit.get("text") or "Texto no disponible",
+                "paper_title": best_hit.get("title", ""),
+                "pubmed_url": best_hit.get("url", "") # URL original
+            }
+            
+            # Sobreescribimos la URL del hit para que apunte al viewer
+            best_hit["url"] = f"/api/viewer?id={snippet_id}"
+
         # Compliance Check
         citations = [
             Citation(
@@ -170,6 +192,20 @@ async def validate_text(req: ValidateTextRequest, validator: ClaimValidatorServi
     # AWAIT HERE
     res = await validator.validate(req.text)
     
+    # --- CACHE LOGIC FOR VIEWER (TEXT) ---
+    if res["hits"]:
+        best_hit = res["hits"][0]
+        snippet_id = f"text_{_sha16(req.text)}"
+        
+        SNIPPET_CACHE[snippet_id] = {
+            "claim": req.text,
+            "snippet": (best_hit.get("text") or "")[:500] + "...",
+            "full_text": best_hit.get("text") or "Texto no disponible",
+            "paper_title": best_hit.get("title", ""),
+            "pubmed_url": best_hit.get("url", "")
+        }
+        best_hit["url"] = f"/api/viewer?id={snippet_id}"
+
     # Compliance Check (también para texto libre)
     comp_engine = ComplianceEngine()
     citations = [

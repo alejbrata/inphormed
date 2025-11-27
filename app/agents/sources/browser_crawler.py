@@ -83,14 +83,7 @@ class BrowserCrawler:
                 # Si el texto es corto (<2000 chars) y parece que venimos de un DOI o PMID
                 if (not text or len(text) < 2000) and ("doi.org" in url or "pubmed" in url):
                     log_debug("RETRY: Estrategia directa falló/corta. Intentando vía botón PubMed...")
-                    
-                    # Si tenemos un DOI, construimos la url de pubmed (o usamos la que nos dieron)
-                    # Asumimos que el 'url' de entrada podría ser el DOI.
-                    # Para este truco, necesitamos saber el PMID.
-                    # Si no lo tenemos aquí, asumiremos que la URL de entrada ERA la de pubmed
-                    # o intentaremos buscar en Google el PMID (demasiado complejo).
-                    # Simplificación: Si la URL es doi.org, intentamos navegar igual.
-                    pass # (Implementado implícitamente en la lógica de navegación robusta)
+                    pass 
 
                 await browser.close()
                 return text
@@ -126,9 +119,49 @@ class BrowserCrawler:
                 else:
                     log_debug("WARN: No encontré botón Full Text en PubMed.")
 
-            # --- FASE DE ESPERA ACTIVA (Anti-Lazy Loading) ---
+            # --- FASE DE ESPERA ACTIVA (Anti-Lazy Loading + Cloudflare) ---
             log_debug("WAIT: Esperando carga dinámica...")
-            await asyncio.sleep(5) # Espera inicial
+            
+            # 1. Detección de Cloudflare / Challenge
+            try:
+                title = await page.title()
+                content = await page.content()
+                if "Just a moment" in title or "Verify you are human" in content or "security of your connection" in content:
+                    log_debug("DETECTADO: Cloudflare Challenge. Intentando bypass activo...")
+                    
+                    # Intentar hacer clic en el checkbox si existe (Turnstile / Challenge)
+                    # Selectores comunes de Cloudflare
+                    cf_selectors = [
+                        "iframe[src*='challenges']", 
+                        "#challenge-stage",
+                        "input[type='checkbox']"
+                    ]
+                    
+                    # Esperar un poco a que renderice el widget
+                    await asyncio.sleep(5)
+                    
+                    # Intentar clicar en iframes (Turnstile suele estar en un iframe)
+                    for frame in page.frames:
+                        try:
+                            # Buscar checkbox dentro del iframe
+                            checkbox = frame.locator("input[type='checkbox']").first
+                            if await checkbox.count() > 0:
+                                log_debug("CLOUDFLARE: Checkbox encontrado en iframe. Click.")
+                                await checkbox.click(force=True)
+                                await asyncio.sleep(2)
+                        except Exception:
+                            pass
+
+                    # Esperar a que pase la validación
+                    await asyncio.sleep(15)
+                    
+                    # Re-check
+                    title = await page.title()
+                    log_debug(f"POST-WAIT Title: {title}")
+            except Exception as e:
+                log_debug(f"CLOUDFLARE ERROR: {e}")
+
+            await asyncio.sleep(5) # Espera inicial estándar
             
             # Scroll humano progresivo
             for i in range(10):
@@ -199,6 +232,14 @@ class BrowserCrawler:
             
             # Limpieza básica
             clean_text = text.replace("\n\n\n", "\n\n").strip()
+            
+            # --- VALIDACIÓN FINAL: ¿Seguimos en Cloudflare? ---
+            # Si después de todo el texto sigue siendo el challenge, devolvemos None
+            # para que el sistema use el abstract en su lugar.
+            if "Verify you are human" in clean_text or "Cloudflare" in clean_text or "security of your connection" in clean_text:
+                log_debug("FAIL: El texto extraído sigue siendo el Challenge de Cloudflare. Abortando.")
+                return None
+
             log_debug(f"DONE: Texto extraído: {len(clean_text)} caracteres.")
             
             return clean_text
