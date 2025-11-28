@@ -93,6 +93,22 @@ class ValidationResult(BaseModel):
     citations: List[Citation] = []       # citas usadas para la decisión
 
 
+class ComplianceIssue(BaseModel):
+    rule_id: str
+    description: str
+    severity: str  # critical, major, minor, info
+    passed: bool
+    reason: Optional[str] = None
+
+
+class ComplianceReport(BaseModel):
+    standard: str
+    issues: List[ComplianceIssue]
+    score: float
+    passed: bool
+    notes: Optional[str] = None
+
+
 class ComplianceResult(BaseModel):
     """
     Resultado del módulo de compliance (EMA/FDA) para el texto generado/claim.

@@ -53,7 +53,9 @@ async def orchestrate_llm_first(
     candidates = await _gather_from_sources(sources, claim, slide_ctx, limit=max(2, topk * 2))
     fetch_ms = (time.time() - fetch_start) * 1000
 
-    judged_heap: List[Tuple[float, CandidateDoc]] = []
+    # Heap elements: (negative_score, candidate_id, candidate_obj)
+    # Added candidate_id as tie-breaker to avoid comparing CandidateDoc objects
+    judged_heap: List[Tuple[float, str, CandidateDoc]] = []
     best: CandidateDoc | None = None
     canceled_early = False
 
@@ -70,7 +72,8 @@ async def orchestrate_llm_first(
         cand.score = jr.score
         cand.verdict = jr.verdict
 
-        heapq.heappush(judged_heap, (-cand.score, cand))
+        # FIX: Add cand.id as tie breaker
+        heapq.heappush(judged_heap, (-cand.score, cand.id, cand))
         if best is None or cand.score > (best.score or 0.0):
             best = cand
 
@@ -87,14 +90,16 @@ async def orchestrate_llm_first(
         cand.llm_judgement = jr
         cand.score = jr.score
         cand.verdict = jr.verdict
-        heapq.heappush(judged_heap, (-cand.score, cand))
+        # FIX: Add cand.id as tie breaker
+        heapq.heappush(judged_heap, (-cand.score, cand.id, cand))
         if best is None or cand.score > (best.score or 0.0):
             best = cand
 
     ranked: List[RankedItem] = []
     k = 0
     while judged_heap and k < topk:
-        _, cand = heapq.heappop(judged_heap)
+        # FIX: Unpack 3 elements
+        _, _, cand = heapq.heappop(judged_heap)
         k += 1
         jr = cand.llm_judgement
         ranked.append(RankedItem(

@@ -5,6 +5,7 @@ Tu ÚNICA fuente de verdad son los FRAGMENTOS RELEVANTES proporcionados.
 NO uses tu conocimiento previo sobre el estudio, el fármaco o los autores.
 
 Reglas de Oro:
+0. RELEVANCIA TEMÁTICA: Si el CLAIM habla de un fármaco (ej: Secukinumab) y el TEXTO habla de otra cosa (ej: Monkeypox), el veredicto ES 'insufficient' y score 0.0.
 1. Si la información del CLAIM no aparece explícitamente en los FRAGMENTOS, el veredicto ES 'insufficient'.
 2. No asumas que el claim es cierto porque "suena correcto" o porque conoces el estudio. Si no está en el texto provisto, NO EXISTE.
 3. Para dar GREEN (supports), el texto debe respaldar el claim sin ambigüedad.

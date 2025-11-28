@@ -356,6 +356,39 @@ export default function ClaimsValidator({ onValidationComplete }: ClaimsValidato
                                                     )}
                                                 </div>
                                             </div>
+
+                                            {/* Compliance Section */}
+                                            {(result.compliance_status === 'fail' || result.compliance_status === 'pass') && (
+                                                <div className={`mt-4 rounded-xl p-4 border ${result.compliance_status === 'pass'
+                                                        ? 'bg-emerald-50 border-emerald-100'
+                                                        : 'bg-rose-50 border-rose-100'
+                                                    }`}>
+                                                    <h4 className={`text-xs font-bold uppercase tracking-wider mb-2 flex items-center gap-1 ${result.compliance_status === 'pass' ? 'text-emerald-600' : 'text-rose-600'
+                                                        }`}>
+                                                        {result.compliance_status === 'pass' ? (
+                                                            <CheckCircle2 className="w-3 h-3" />
+                                                        ) : (
+                                                            <AlertTriangle className="w-3 h-3" />
+                                                        )}
+                                                        Regulatory Compliance (Farmaindustria)
+                                                    </h4>
+
+                                                    {result.compliance_status === 'pass' ? (
+                                                        <p className="text-sm text-emerald-800 font-medium">
+                                                            Passes regulatory checks.
+                                                        </p>
+                                                    ) : (
+                                                        <div className="space-y-1">
+                                                            <p className="text-sm text-rose-800 font-bold">
+                                                                Compliance Issue Detected:
+                                                            </p>
+                                                            <p className="text-sm text-rose-700 italic">
+                                                                "{result.compliance_reason}"
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
                                         </motion.div>
                                     ))}
                                 </div>

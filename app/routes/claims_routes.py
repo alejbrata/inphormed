@@ -54,6 +54,10 @@ class ClaimResult(BaseModel):
     status: str
     best_score: float
     hits: List[ClaimHit]
+    # Flattened best hit fields for frontend convenience
+    best_verdict: Optional[str] = None
+    best_title: Optional[str] = None
+    best_url: Optional[str] = None
     # Compliance fields
     compliance_status: Optional[str] = None
     compliance_reason: Optional[str] = None
@@ -107,9 +111,14 @@ async def validate_ppt(
     for c in claims:
         # AWAIT HERE
         res = await validator.validate(c["text"])
+        print(f"DEBUG: Claim '{c['text'][:30]}...' -> Hits: {len(res['hits'])}")
         
         # --- CACHE LOGIC FOR VIEWER ---
         # Si hay hits, tomamos el mejor (el primero) y lo guardamos en caché para el viewer
+        best_verdict = "insufficient"
+        best_title = ""
+        best_url = None
+        
         if res["hits"]:
             best_hit = res["hits"][0]
             # Generamos un ID único para este snippet
@@ -125,6 +134,11 @@ async def validate_ppt(
             
             # Sobreescribimos la URL del hit para que apunte al viewer
             best_hit["url"] = f"/api/viewer?id={snippet_id}"
+            
+            # Populate flattened fields
+            best_verdict = "supports" if res["best_score"] >= validator.thr_green else "insufficient" # Simplification
+            best_title = best_hit.get("title", "")
+            best_url = best_hit.get("url")
 
         # Compliance Check
         citations = [
@@ -138,19 +152,29 @@ async def validate_ppt(
         
         comp_report = comp_engine.run_checks(claim=c["text"], citations=citations)
         compliance_status = "pass" if comp_report.passed else "fail"
+        print(f"DEBUG: Compliance Status: {compliance_status}, Issues: {len(comp_report.issues)}")
+        
         compliance_reason = None
         if not comp_report.passed and comp_report.issues:
             # Tomamos el primer fallo o concatenamos
             failures = [i.reason for i in comp_report.issues if not i.passed]
             compliance_reason = "; ".join(failures) if failures else "Compliance check failed"
 
+        # Override status if compliance fails
+        final_status = res["status"]
+        if compliance_status == "fail":
+            final_status = "red"
+
         results.append({
             "where": c["where"],
             "text": c["text"],
             "claim_id": c["claim_id"],
-            "status": res["status"],
+            "status": final_status,
             "best_score": res["best_score"],
             "hits": res["hits"],
+            "best_verdict": best_verdict,
+            "best_title": best_title,
+            "best_url": best_url,
             "compliance_status": compliance_status,
             "compliance_reason": compliance_reason,
         })
@@ -223,11 +247,15 @@ async def validate_text(req: ValidateTextRequest, validator: ClaimValidatorServi
         failures = [i.reason for i in comp_report.issues if not i.passed]
         compliance_reason = "; ".join(failures) if failures else "Compliance check failed"
 
+    final_status = res["status"]
+    if compliance_status == "fail":
+        final_status = "red"
+
     return ValidateTextResponse(
         where="text",
         text=req.text,
         claim_id=_sha16(req.text),
-        status=res["status"],
+        status=final_status,
         best_score=res["best_score"],
         hits=[ClaimHit(**h) for h in res["hits"]],
         compliance_status=compliance_status,

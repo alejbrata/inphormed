@@ -43,6 +43,8 @@ export interface ClaimValidationResult {
     best_url: string | null;
     ranked: any[];
     timings_ms: Record<string, number>;
+    compliance_status?: 'pass' | 'fail';
+    compliance_reason?: string;
 }
 
 export interface PPTXValidationResponse {
