@@ -1,34 +1,83 @@
+import os
+import uuid
+from typing import List, Tuple, Dict, Any
 from pptx import Presentation
 from pptx.util import Pt, Inches
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
 from app.services.llm_service import LLMService
-from typing import Dict, Any
 import io
-import pypdf
+import fitz  # PyMuPDF
 import docx
 
 class GenerationAgent:
     def __init__(self):
         self.llm = LLMService()
-        # Theme Colors
-        self.COLOR_PRIMARY = RGBColor(79, 70, 229)    # Indigo 600
-        self.COLOR_SECONDARY = RGBColor(13, 148, 136) # Teal 600
-        self.COLOR_BG = RGBColor(248, 250, 252)       # Slate 50
-        self.COLOR_TEXT = RGBColor(30, 41, 59)        # Slate 800
-        self.COLOR_ACCENT = RGBColor(99, 102, 241)    # Indigo 500
+        # Pharma Corporate Colors
+        self.COLOR_PRIMARY = RGBColor(0, 51, 102)     # Navy Blue (Trust/Authority)
+        self.COLOR_SECONDARY = RGBColor(0, 114, 206)  # Medical Blue (Innovation)
+        self.COLOR_BG = RGBColor(255, 255, 255)       # White
+        self.COLOR_TEXT = RGBColor(51, 51, 51)        # Dark Grey (Readability)
+        self.COLOR_LIGHT_BG = RGBColor(240, 242, 245) # Soft Grey (Backgrounds)
+        self.FONT_NAME = 'Arial' # Clean, standard sans-serif
 
-    def extract_text_from_file(self, file_content: bytes, filename: str) -> str:
+    def extract_text_from_file(self, file_content: bytes, filename: str) -> Tuple[str, List[str]]:
+        """
+        Extrae texto e imágenes de un archivo usando PyMuPDF (fitz).
+        Retorna: (texto_completo, lista_de_rutas_a_imagenes_temporales)
+        """
         text = ""
+        image_paths = []
+        
         if filename.lower().endswith('.pdf'):
             try:
-                pdf_file = io.BytesIO(file_content)
-                reader = pypdf.PdfReader(pdf_file)
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
+                # Abrir PDF desde memoria
+                pdf_document = fitz.open(stream=file_content, filetype="pdf")
+                
+                # Crear directorio temporal para imágenes si no existe
+                temp_img_dir = os.path.join(os.getcwd(), "temp_images")
+                os.makedirs(temp_img_dir, exist_ok=True)
+
+                for page_index in range(len(pdf_document)):
+                    page = pdf_document[page_index]
+                    text += page.get_text() + "\n"
+                    
+                    # Extraer imágenes
+                    image_list = page.get_images(full=True)
+                    
+                    for img_index, img in enumerate(image_list):
+                        try:
+                            xref = img[0]
+                            base_image = pdf_document.extract_image(xref)
+                            image_bytes = base_image["image"]
+                            image_ext = base_image["ext"]
+                            
+                            # Filtrar imágenes muy pequeñas (iconos, líneas)
+                            if len(image_bytes) < 2048: # < 2KB
+                                continue
+
+                            img_name = f"{uuid.uuid4().hex}.{image_ext}"
+                            img_path = os.path.join(temp_img_dir, img_name)
+                            
+                            with open(img_path, "wb") as fp:
+                                fp.write(image_bytes)
+                            
+                            image_paths.append(img_path)
+                            
+                            # Limitar a 15 imágenes para no saturar
+                            if len(image_paths) >= 15:
+                                break
+                        except Exception as e:
+                            print(f"Error extrayendo imagen {img_index} en pág {page_index}: {e}")
+                    
+                    if len(image_paths) >= 15:
+                        break
+
             except Exception as e:
-                print(f"Error extracting PDF: {e}")
+                print(f"Error extracting PDF with Fitz: {e}")
                 raise ValueError("Error al procesar el archivo PDF.")
+                
         elif filename.lower().endswith('.docx'):
             try:
                 docx_file = io.BytesIO(file_content)
@@ -39,164 +88,339 @@ class GenerationAgent:
                 print(f"Error extracting DOCX: {e}")
                 raise ValueError("Error al procesar el archivo Word.")
         else:
-            # Try as plain text
             try:
                 text = file_content.decode('utf-8')
             except:
                 raise ValueError("Formato de archivo no soportado. Usa PDF, DOCX o Texto.")
         
-        return text.strip()
+        return text.strip(), image_paths
 
-    def _apply_slide_formatting(self, slide, title_text, is_title_slide=False):
-        # Set Background
+    def _apply_theme(self, slide, is_title_slide=False):
+        """Aplica elementos de diseño geométrico y fondo."""
+        # Fondo
         background = slide.background
         fill = background.fill
         fill.solid()
         fill.fore_color.rgb = self.COLOR_BG
-
-        # Format Title
-        if slide.shapes.title:
-            title = slide.shapes.title
-            title.text = title_text
-            
-            # Position title (except for title slide which has its own layout)
-            if not is_title_slide:
-                title.top = Inches(0.5)
-                title.left = Inches(0.5)
-                title.width = Inches(9)
-                title.height = Inches(1.0)
-
-            for paragraph in title.text_frame.paragraphs:
-                paragraph.font.name = 'Calibri'
-                paragraph.font.size = Pt(44) if is_title_slide else Pt(32)
-                paragraph.font.bold = True
-                paragraph.font.color.rgb = self.COLOR_PRIMARY
-                paragraph.alignment = PP_ALIGN.CENTER if is_title_slide else PP_ALIGN.LEFT
-
-        # Add Decorative Element (Top Bar)
-        if not is_title_slide:
+        
+        # Elementos Geométricos
+        if is_title_slide:
+            # Banda lateral izquierda grande (Navy)
             shape = slide.shapes.add_shape(
-                1, # msoShapeRectangle
-                Inches(0), Inches(0), Inches(10), Inches(0.15)
+                MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(3.0), Inches(7.5)
+            )
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = self.COLOR_PRIMARY
+            shape.line.fill.background()
+            
+            # Acento Medical Blue
+            shape = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE, Inches(3.0), Inches(0), Inches(0.15), Inches(7.5)
             )
             shape.fill.solid()
             shape.fill.fore_color.rgb = self.COLOR_SECONDARY
-            shape.line.fill.background() # No line
+            shape.line.fill.background()
+            
+        else:
+            # Header Bar Clean (Navy)
+            shape = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(10), Inches(0.1)
+            )
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = self.COLOR_PRIMARY
+            shape.line.fill.background()
+            
+            # Footer Accent (Medical Blue)
+            shape = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE, Inches(0), Inches(7.4), Inches(10), Inches(0.1)
+            )
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = self.COLOR_SECONDARY
+            shape.line.fill.background()
 
-        # Add Footer
-        footer = slide.shapes.add_textbox(Inches(0.5), Inches(7.0), Inches(9), Inches(0.5))
+        # Footer Text
+        footer = slide.shapes.add_textbox(Inches(0.5), Inches(7.1), Inches(9), Inches(0.3))
         tf = footer.text_frame
         p = tf.paragraphs[0]
         p.text = "Inphormed AI • Generado automáticamente"
-        p.font.size = Pt(10)
-        p.font.color.rgb = RGBColor(148, 163, 184) # Slate 400
-        p.alignment = PP_ALIGN.CENTER
+        p.font.size = Pt(9)
+        p.font.name = self.FONT_NAME
+        p.font.color.rgb = RGBColor(128, 128, 128)
+        p.alignment = PP_ALIGN.RIGHT
 
-    def generate_presentation(self, text: str, num_slides: int) -> bytes:
+    def generate_presentation(self, text: str, num_slides: int, image_paths: List[str] = []) -> bytes:
         # 1. Obtener estructura JSON del LLM
-        structure = self._get_presentation_structure(text, num_slides)
+        structure = self._get_presentation_structure(text, num_slides, len(image_paths))
         
         # 2. Crear PPTX
         prs = Presentation()
         
         # --- Slide 1: Título ---
-        title_slide_layout = prs.slide_layouts[0] # Title Slide
+        title_slide_layout = prs.slide_layouts[6] # Blank
         slide = prs.slides.add_slide(title_slide_layout)
+        self._apply_theme(slide, is_title_slide=True)
         
-        title_text = structure.get("title", "Presentación Generada")
-        self._apply_slide_formatting(slide, title_text, is_title_slide=True)
+        # Título (Sobre la banda oscura o a la derecha)
+        title_text = structure.get("title", "Presentación Ejecutiva")
         
-        # Subtitle
-        if slide.placeholders[1]:
-            subtitle = slide.placeholders[1]
-            subtitle.text = "Generado por Inphormed AI"
-            for paragraph in subtitle.text_frame.paragraphs:
-                paragraph.font.size = Pt(20)
-                paragraph.font.color.rgb = self.COLOR_SECONDARY
+        # Título Principal (Navy sobre Blanco)
+        title_shape = slide.shapes.add_textbox(Inches(3.5), Inches(2.5), Inches(6.0), Inches(3.0))
+        tf = title_shape.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = title_text
+        p.font.name = self.FONT_NAME
+        p.font.size = Pt(40)
+        p.font.bold = True
+        p.font.color.rgb = self.COLOR_PRIMARY
+        p.alignment = PP_ALIGN.LEFT
+        
+        # Subtítulo
+        subtitle_shape = slide.shapes.add_textbox(Inches(3.5), Inches(4.5), Inches(6.0), Inches(1.0))
+        tf = subtitle_shape.text_frame
+        p = tf.paragraphs[0]
+        p.text = "Generado por Inphormed AI"
+        p.font.name = self.FONT_NAME
+        p.font.size = Pt(18)
+        p.font.color.rgb = self.COLOR_SECONDARY
 
         # --- Slides de Contenido ---
-        bullet_slide_layout = prs.slide_layouts[1] # Title and Content
+        blank_layout = prs.slide_layouts[6]
+        img_index = 0
         
         for slide_data in structure.get("slides", []):
-            slide = prs.slides.add_slide(bullet_slide_layout)
+            slide = prs.slides.add_slide(blank_layout)
+            self._apply_theme(slide, is_title_slide=False)
             
-            # Apply formatting and title
-            self._apply_slide_formatting(slide, slide_data.get("title", "Sin Título"))
+            # Título de Slide
+            title_shape = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(9), Inches(0.8))
+            tf = title_shape.text_frame
+            p = tf.paragraphs[0]
+            p.text = slide_data.get("title", "").upper()
+            p.font.name = self.FONT_NAME
+            p.font.size = Pt(24)
+            p.font.bold = True
+            p.font.color.rgb = self.COLOR_PRIMARY
             
-            # Content Body
-            if slide.placeholders[1]:
-                body_shape = slide.placeholders[1]
-                body_shape.top = Inches(1.5)
-                body_shape.left = Inches(0.5)
-                body_shape.width = Inches(9)
-                body_shape.height = Inches(5.0)
-
+            layout_type = slide_data.get("layout", "title_body")
+            points = slide_data.get("points", [])
+            
+            # --- Lógica de Layouts ---
+            
+            if layout_type == "image_right" and image_paths:
+                # Texto Izq (45%), Imagen Der (45%)
+                body_shape = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(4.5), Inches(5.0))
                 tf = body_shape.text_frame
                 tf.word_wrap = True
-                
-                points = slide_data.get("points", [])
-                if points:
-                    tf.text = points[0]
-                    p = tf.paragraphs[0]
+                for point in points:
+                    p = tf.add_paragraph()
+                    p.text = f"• {point}"
+                    p.font.name = self.FONT_NAME
                     p.font.size = Pt(18)
                     p.font.color.rgb = self.COLOR_TEXT
                     p.space_after = Pt(14)
 
-                    for point in points[1:]:
-                        p = tf.add_paragraph()
-                        p.text = point
-                        p.font.size = Pt(18)
-                        p.font.color.rgb = self.COLOR_TEXT
-                        p.space_after = Pt(14)
-                        p.level = 0
+                try:
+                    current_img = image_paths[img_index % len(image_paths)]
+                    # Imagen con borde sutil
+                    pic = slide.shapes.add_picture(current_img, Inches(5.2), Inches(1.5), width=Inches(4.3))
+                    
+                    # Borde
+                    rect = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE, Inches(5.2), Inches(1.5), Inches(4.3), pic.height
+                    )
+                    rect.fill.background()
+                    rect.line.color.rgb = self.COLOR_SECONDARY
+                    rect.line.width = Pt(1.0)
+                    
+                    img_index += 1
+                except Exception as e:
+                    print(f"Error imagen: {e}")
 
-        # 3. Guardar en buffer
+            elif layout_type == "two_column":
+                # Dos columnas de texto
+                mid_point = len(points) // 2
+                col1_points = points[:mid_point]
+                col2_points = points[mid_point:]
+                
+                # Col 1
+                body1 = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(4.2), Inches(5.0))
+                tf1 = body1.text_frame
+                tf1.word_wrap = True
+                for point in col1_points:
+                    p = tf1.add_paragraph()
+                    p.text = f"• {point}"
+                    p.font.name = self.FONT_NAME
+                    p.font.size = Pt(18)
+                    p.font.color.rgb = self.COLOR_TEXT
+                    p.space_after = Pt(14)
+                
+                # Col 2
+                body2 = slide.shapes.add_textbox(Inches(5.0), Inches(1.5), Inches(4.5), Inches(5.0))
+                tf2 = body2.text_frame
+                tf2.word_wrap = True
+                for point in col2_points:
+                    p = tf2.add_paragraph()
+                    p.text = f"• {point}"
+                    p.font.name = self.FONT_NAME
+                    p.font.size = Pt(18)
+                    p.font.color.rgb = self.COLOR_TEXT
+                    p.space_after = Pt(14)
+
+            elif layout_type == "big_number":
+                # FIX: Estructura Dato + Etiqueta + Explicación
+                
+                # Asumimos estructura: [DATO_CORTO, ETIQUETA, ...explicación...]
+                raw_data = points[0] if points else "0"
+                # Intentar separar si el LLM falló y puso todo junto (ej: "72 artículos")
+                if len(raw_data) > 5 and " " in raw_data:
+                    parts = raw_data.split(" ", 1)
+                    big_text = parts[0]
+                    label_text = parts[1]
+                    desc_text = points[1:]
+                else:
+                    big_text = raw_data
+                    label_text = points[1] if len(points) > 1 else ""
+                    desc_text = points[2:] if len(points) > 2 else []
+                
+                # Columna Izquierda: Círculo con Dato
+                # Círculo
+                oval = slide.shapes.add_shape(
+                    MSO_SHAPE.OVAL, Inches(0.8), Inches(2.0), Inches(3.0), Inches(3.0)
+                )
+                oval.fill.solid()
+                oval.fill.fore_color.rgb = self.COLOR_SECONDARY
+                oval.line.fill.background()
+                
+                # Número (Grande, centrado)
+                num_shape = slide.shapes.add_textbox(Inches(0.8), Inches(2.6), Inches(3.0), Inches(1.2))
+                tf = num_shape.text_frame
+                p = tf.paragraphs[0]
+                p.text = big_text
+                p.font.name = self.FONT_NAME
+                p.font.size = Pt(54)
+                p.font.bold = True
+                p.font.color.rgb = self.COLOR_BG
+                p.alignment = PP_ALIGN.CENTER
+                
+                # Etiqueta (Debajo del número, dentro del círculo)
+                label_shape = slide.shapes.add_textbox(Inches(1.0), Inches(3.8), Inches(2.6), Inches(0.8))
+                tf = label_shape.text_frame
+                tf.word_wrap = True
+                p = tf.paragraphs[0]
+                p.text = label_text
+                p.font.name = self.FONT_NAME
+                p.font.size = Pt(16)
+                p.font.bold = True
+                p.font.color.rgb = self.COLOR_BG
+                p.alignment = PP_ALIGN.CENTER
+                
+                # Columna Derecha: Texto Explicativo
+                body = slide.shapes.add_textbox(Inches(4.2), Inches(2.0), Inches(5.3), Inches(4.5))
+                tf = body.text_frame
+                tf.word_wrap = True
+                for point in desc_text:
+                    p = tf.add_paragraph()
+                    p.text = f"• {point}"
+                    p.font.name = self.FONT_NAME
+                    p.font.size = Pt(20)
+                    p.font.color.rgb = self.COLOR_TEXT
+                    p.space_after = Pt(14)
+
+            elif layout_type == "quote":
+                # Cita centrada con fondo gris claro
+                bg_rect = slide.shapes.add_shape(
+                    MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.0), Inches(2.5), Inches(8.0), Inches(2.5)
+                )
+                bg_rect.fill.solid()
+                bg_rect.fill.fore_color.rgb = self.COLOR_LIGHT_BG
+                bg_rect.line.color.rgb = self.COLOR_SECONDARY
+                
+                body_shape = slide.shapes.add_textbox(Inches(1.5), Inches(3.0), Inches(7.0), Inches(1.5))
+                tf = body_shape.text_frame
+                tf.word_wrap = True
+                p = tf.paragraphs[0]
+                p.text = f'"{points[0]}"' if points else ""
+                p.font.name = self.FONT_NAME
+                p.font.size = Pt(24)
+                p.font.italic = True
+                p.font.color.rgb = self.COLOR_PRIMARY
+                p.alignment = PP_ALIGN.CENTER
+
+            else:
+                # Default: Title and Body
+                body_shape = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(9), Inches(5))
+                tf = body_shape.text_frame
+                tf.word_wrap = True
+                for point in points:
+                    p = tf.add_paragraph()
+                    p.text = f"• {point}"
+                    p.font.name = self.FONT_NAME
+                    p.font.size = Pt(20)
+                    p.font.color.rgb = self.COLOR_TEXT
+                    p.space_after = Pt(14)
+
+            # --- Speaker Notes ---
+            notes_slide = slide.notes_slide
+            text_frame = notes_slide.notes_text_frame
+            text_frame.text = slide_data.get("speaker_notes", "")
+
+        # 3. Guardar
         output = io.BytesIO()
         prs.save(output)
         output.seek(0)
         return output.read()
 
-    def _get_presentation_structure(self, text: str, num_slides: int) -> Dict[str, Any]:
+    def _get_presentation_structure(self, text: str, num_slides: int, num_images: int) -> Dict[str, Any]:
         """
-        Usa el LLM para estructurar el contenido en diapositivas.
+        Usa el LLM para estructurar el contenido.
         """
         system_prompt = f"""
-        Eres un experto en comunicación científica.
-        Tu tarea es transformar un texto técnico en una estructura para una presentación de PowerPoint de {num_slides} diapositivas.
+        Eres un diseñador de presentaciones profesional para la industria FARMACÉUTICA.
         
-        Formato JSON requerido:
+        INPUT: Texto técnico y {num_images} imágenes disponibles extraídas del documento.
+        OUTPUT: JSON para una presentación de {num_slides} diapositivas.
+        
+        LAYOUTS DISPONIBLES:
+        - "title_body": Lista de puntos estándar.
+        - "two_column": Dos columnas de texto (para comparaciones o listas largas).
+        - "image_right": Texto a la izquierda, IMAGEN a la derecha. (¡USA ESTO SI HAY IMÁGENES!)
+        - "big_number": Estadística destacada. Estructura estricta: [DATO_CORTO, ETIQUETA, ...explicación].
+        - "quote": Una cita o frase impactante centrada.
+        
+        REGLAS CRÍTICAS:
+        1.  **USO DE IMÁGENES**: Tienes {num_images} imágenes disponibles. DEBES usar el layout "image_right" en al menos {min(num_images, num_slides // 2)} diapositivas para mostrar gráficos/tablas.
+        2.  **DATOS (big_number)**: 
+            - Punto 1: SOLO EL NÚMERO (ej: "45%", "120"). Máx 5 caracteres.
+            - Punto 2: La etiqueta corta (ej: "Pacientes", "Crecimiento").
+            - Punto 3+: Explicación detallada.
+        3.  **VARIEDAD**: No uses "title_body" en todas. Mezcla layouts.
+        4.  **CONTENIDO**: Sintetiza. No pegues párrafos.
+        
+        Formato JSON:
         {{
-          "title": "Título Principal de la Presentación",
+          "title": "Título",
           "slides": [
             {{
-              "title": "Título de la Diapositiva 1 (ej. Objetivo)",
-              "points": ["Punto clave 1", "Punto clave 2", "Punto clave 3"]
-            }},
-            ...
+              "title": "...",
+              "layout": "image_right", 
+              "points": ["..."],
+              "speaker_notes": "..."
+            }}
           ]
         }}
-        
-        Reglas:
-        - Genera EXACTAMENTE {num_slides} diapositivas de contenido (sin contar la portada).
-        - Cada diapositiva debe tener entre 3 y 5 puntos clave (bullets).
-        - Sé conciso y directo.
         """
         
-        # Truncar texto
         max_chars = 15000
         truncated_text = text[:max_chars] + "..." if len(text) > max_chars else text
-        
-        user_prompt = f"Genera la estructura de la presentación basada en este texto:\n\n{truncated_text}"
+        user_prompt = f"Genera la estructura:\n\n{truncated_text}"
         
         data = self.llm.chat_with_json(system_prompt, user_prompt)
         
         if not data or "slides" not in data:
-             # Fallback simple si falla el JSON
              return {
                  "title": "Resumen Automático",
-                 "slides": [
-                     {"title": "Error de Generación", "points": ["No se pudo estructurar el contenido correctamente."]}
-                 ]
+                 "slides": [{"title": "Error", "points": ["Fallo al generar."], "layout": "title_body"}]
              }
              
         return data

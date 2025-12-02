@@ -128,3 +128,26 @@ class PodcastService:
         
         combined_audio.seek(0)
         return combined_audio.read()
+
+    async def generate_audio_from_text(self, text: str) -> bytes:
+        """
+        Genera audio directo desde un texto plano (para resúmenes).
+        Usa una sola voz (Onyx o Alloy).
+        """
+        if not self.llm.client or self.llm.provider != "openai":
+             if self.llm.provider != "openai":
+                 raise ValueError("La generación de audio requiere OpenAI por ahora.")
+
+        voice = "onyx" # Voz profunda y profesional
+
+        try:
+            response = self.llm.client.audio.speech.create(
+                model="tts-1",
+                voice=voice,
+                input=text
+            )
+            # Retornar bytes directos
+            return response.content
+        except Exception as e:
+            print(f"Error generando audio resumen: {e}")
+            raise e

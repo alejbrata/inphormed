@@ -160,6 +160,7 @@ export const generatePodcast = async (file: File): Promise<PodcastResponse> => {
 export interface SummaryResponse {
     summary: string;
     file_name: string;
+    audio_base64?: string;
 }
 
 export const generateSummary = async (file: File): Promise<SummaryResponse> => {

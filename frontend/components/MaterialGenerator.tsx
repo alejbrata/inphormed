@@ -312,30 +312,50 @@ export default function MaterialGenerator() {
                         <div className="p-6 grid grid-cols-1 gap-3">
                             <div className="grid grid-cols-2 gap-3">
                                 <button
-                                    onClick={() => handleGenerate('podcast')}
-                                    disabled={loading || activeMode === 'slides'} // Disable if in slides mode to avoid confusion, or handle mode switch
-                                    className={`
-                                        py-3 rounded-xl font-bold text-white shadow-lg shadow-indigo-500/20
-                                        flex items-center justify-center gap-2 transition-all duration-300 text-sm
-                                        ${loading || activeMode === 'slides'
-                                            ? 'bg-slate-200 text-slate-400 shadow-none'
-                                            : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:scale-[1.02]'
+                                    onClick={() => {
+                                        if (activeMode !== 'podcast') {
+                                            setActiveMode('podcast');
+                                            setSummaryResult(null);
+                                            setSlidesResult(false);
+                                            setError(null);
+                                        } else {
+                                            handleGenerate('podcast');
                                         }
+                                    }}
+                                    disabled={loading}
+                                    className={`
+                                        py-3 rounded-xl font-bold shadow-lg shadow-indigo-500/20
+                                        flex items-center justify-center gap-2 transition-all duration-300 text-sm
+                                        ${activeMode === 'podcast'
+                                            ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:scale-[1.02]'
+                                            : 'bg-white border-2 border-indigo-100 text-indigo-600 hover:bg-indigo-50'
+                                        }
+                                        ${loading ? 'opacity-50 cursor-not-allowed' : ''}
                                     `}
                                 >
                                     <Mic2 className="w-4 h-4" /> Podcast
                                 </button>
 
                                 <button
-                                    onClick={() => handleGenerate('summary')}
-                                    disabled={loading || activeMode === 'slides'}
-                                    className={`
-                                        py-3 rounded-xl font-bold text-white shadow-lg shadow-teal-500/20
-                                        flex items-center justify-center gap-2 transition-all duration-300 text-sm
-                                        ${loading || activeMode === 'slides'
-                                            ? 'bg-slate-200 text-slate-400 shadow-none'
-                                            : 'bg-gradient-to-r from-teal-500 to-emerald-600 hover:scale-[1.02]'
+                                    onClick={() => {
+                                        if (activeMode !== 'summary') {
+                                            setActiveMode('summary');
+                                            setPodcastResult(null);
+                                            setSlidesResult(false);
+                                            setError(null);
+                                        } else {
+                                            handleGenerate('summary');
                                         }
+                                    }}
+                                    disabled={loading}
+                                    className={`
+                                        py-3 rounded-xl font-bold shadow-lg shadow-teal-500/20
+                                        flex items-center justify-center gap-2 transition-all duration-300 text-sm
+                                        ${activeMode === 'summary'
+                                            ? 'bg-gradient-to-r from-teal-500 to-emerald-600 text-white hover:scale-[1.02]'
+                                            : 'bg-white border-2 border-teal-100 text-teal-600 hover:bg-teal-50'
+                                        }
+                                        ${loading ? 'opacity-50 cursor-not-allowed' : ''}
                                     `}
                                 >
                                     <FileText className="w-4 h-4" /> Resumen
@@ -506,6 +526,39 @@ export default function MaterialGenerator() {
                                         {summaryResult.file_name}
                                     </span>
                                 </div>
+
+                                {/* Audio Player for Summary */}
+                                {summaryResult.audio_base64 && (
+                                    <div className="bg-slate-900 p-6 text-white flex items-center gap-6">
+                                        <button
+                                            onClick={() => {
+                                                if (audioRef.current) {
+                                                    if (isPlaying) audioRef.current.pause();
+                                                    else audioRef.current.play();
+                                                    setIsPlaying(!isPlaying);
+                                                }
+                                            }}
+                                            className="w-14 h-14 bg-teal-500 rounded-full flex items-center justify-center hover:scale-105 transition-transform shadow-lg shadow-teal-500/30 flex-shrink-0"
+                                        >
+                                            {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}
+                                        </button>
+
+                                        <div className="flex-1">
+                                            <h4 className="font-bold text-lg mb-1">Escuchar Resumen</h4>
+                                            <p className="text-slate-400 text-sm">Audio generado por IA • Inphormed</p>
+                                        </div>
+
+                                        <audio
+                                            ref={audioRef}
+                                            src={`data:audio/mp3;base64,${summaryResult.audio_base64}`}
+                                            onEnded={() => setIsPlaying(false)}
+                                            onPlay={() => setIsPlaying(true)}
+                                            onPause={() => setIsPlaying(false)}
+                                            className="hidden"
+                                        />
+                                    </div>
+                                )}
+
                                 <div className="p-8 prose prose-slate max-w-none">
                                     <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">
                                         {summaryResult.summary}

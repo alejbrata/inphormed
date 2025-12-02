@@ -61,9 +61,14 @@ async def generate_summary(
              raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
 
         summary = service.generate_summary(text)
+        
+        # Generar audio del resumen
+        audio_bytes = await service.generate_audio_from_text(summary)
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
         return JSONResponse({
             "summary": summary,
+            "audio_base64": audio_b64,
             "file_name": file.filename
         })
 
@@ -73,6 +78,7 @@ async def generate_summary(
 
 @router.post("/slides", summary="Genera una presentación PPTX desde texto o archivo")
 async def generate_slides(
+    background_tasks: BackgroundTasks,
     text: str = Form(None),
     file: UploadFile = File(None),
     num_slides: int = Form(5)
@@ -80,21 +86,41 @@ async def generate_slides(
     if not text and not file:
         raise HTTPException(status_code=400, detail="Se requiere texto o un archivo.")
 
+    import os
+    import shutil
+
+    # Helper para cleanup
+    def cleanup_images(image_paths):
+        for path in image_paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                print(f"Error borrando imagen temporal {path}: {e}")
+
     try:
         from app.agents.generation_agent import GenerationAgent
         agent = GenerationAgent()
         
         content_text = ""
+        image_paths = []
+
         if file:
             content = await file.read()
-            content_text = agent.extract_text_from_file(content, file.filename)
+            # Ahora devuelve tupla (texto, imagenes)
+            content_text, image_paths = agent.extract_text_from_file(content, file.filename)
         else:
             content_text = text
 
         if not content_text or len(content_text.strip()) < 50:
              raise HTTPException(status_code=400, detail="El contenido es demasiado corto para generar una presentación.")
 
-        pptx_bytes = agent.generate_presentation(content_text, num_slides)
+        # Generar PPTX pasando imágenes
+        pptx_bytes = agent.generate_presentation(content_text, num_slides, image_paths)
+
+        # Programar limpieza
+        if image_paths:
+            background_tasks.add_task(cleanup_images, image_paths)
 
         # Retornar como archivo descargable
         return StreamingResponse(
