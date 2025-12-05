@@ -201,4 +201,56 @@ export const generateSlides = async (text: string | null, file: File | null, num
     return response.data;
 };
 
+export interface BattleCardAnalysis {
+    study_design_flaws: string[];
+    safety_signals: string[];
+    strategic_counter_arguments: string[];
+    overall_threat_level: 'Bajo' | 'Medio' | 'Alto';
+}
+
+export const generateBattleCard = async (file: File): Promise<BattleCardAnalysis> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await apiClient.post<BattleCardAnalysis>(
+        '/api/generate/battle-card',
+        formData,
+        {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+            timeout: 300000,
+        }
+    );
+
+    return response.data;
+};
+
+export interface MedInfoResponse {
+    subject: string;
+    summary: string;
+    efficacy_data: string[];
+    safety_data: string[];
+    limitations: string[];
+    references: string[];
+}
+
+export const generateMedInfo = async (file: File): Promise<MedInfoResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await apiClient.post<MedInfoResponse>(
+        '/api/generate/medinfo',
+        formData,
+        {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+            timeout: 300000,
+        }
+    );
+
+    return response.data;
+};
+
 export default apiClient;

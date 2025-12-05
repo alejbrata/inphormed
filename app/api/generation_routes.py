@@ -132,3 +132,58 @@ async def generate_slides(
     except Exception as e:
         print(f"Error generando slides: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/battle-card", summary="Genera una Battle Card de competidor desde un PDF")
+async def generate_battle_card(
+    file: UploadFile = File(...),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser un PDF.")
+
+    try:
+        content = await file.read()
+        # Reusing PodcastService for text extraction to avoid code duplication
+        # In a real refactor, we would move this to a PdfUtils class
+        # from app.services.podcast_service import PodcastService (already imported at top)
+        extractor = PodcastService()
+        text = extractor.extract_text_from_pdf(content)
+
+        if not text:
+             raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
+
+        from app.services.battle_card_service import BattleCardService
+        service = BattleCardService()
+        analysis = service.generate_competitor_analysis(text)
+
+        return analysis
+
+    except Exception as e:
+        print(f"Error generando battle card: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/medinfo", summary="Genera una Carta de Respuesta Estándar (MedInfo) desde un PDF")
+async def generate_medinfo(
+    file: UploadFile = File(...),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser un PDF.")
+
+    try:
+        content = await file.read()
+        # Reusing PodcastService for text extraction
+        from app.services.podcast_service import PodcastService
+        extractor = PodcastService()
+        text = extractor.extract_text_from_pdf(content)
+
+        if not text:
+             raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
+
+        from app.services.medinfo_service import MedInfoService
+        service = MedInfoService()
+        response = service.generate_response_letter(text)
+
+        return response
+
+    except Exception as e:
+        print(f"Error generando MedInfo response: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

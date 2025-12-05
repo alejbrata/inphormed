@@ -119,3 +119,32 @@ class ComplianceResult(BaseModel):
     score: Optional[float] = None
     passed: Optional[bool] = None
     issues: Optional[List[Any]] = None    # puedes tiparlo a List[str] si prefieres
+
+
+# ─────────────────────────────────────────────────────────────
+# Medical Intelligence / Battle Cards
+# ─────────────────────────────────────────────────────────────
+class BattleCardAnalysis(BaseModel):
+    """
+    Análisis crítico de un paper de la competencia.
+    """
+    study_design_flaws: List[str]
+    safety_signals: List[str]
+    strategic_counter_arguments: List[str]
+    overall_threat_level: Literal["Bajo", "Medio", "Alto"]
+
+
+# ─────────────────────────────────────────────────────────────
+# MedInfo / Standard Response Documents
+# ─────────────────────────────────────────────────────────────
+class MedInfoResponse(BaseModel):
+    """
+    Estructura de una Carta de Respuesta Estándar (SRD).
+    """
+    subject: str
+    summary: str
+    efficacy_data: List[str]
+    safety_data: List[str]
+    limitations: List[str]
+    references: List[str]
+
