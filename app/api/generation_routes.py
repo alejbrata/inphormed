@@ -76,12 +76,13 @@ async def generate_summary(
         print(f"Error generando resumen: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/slides", summary="Genera una presentación PPTX desde texto o archivo")
+@router.post("/slides", summary="Genera una presentación PPTX o PDF (One-Pager) desde texto o archivo")
 async def generate_slides(
     background_tasks: BackgroundTasks,
     text: str = Form(None),
     file: UploadFile = File(None),
-    num_slides: int = Form(5)
+    num_slides: int = Form(5),
+    style: str = Form("default")
 ):
     if not text and not file:
         raise HTTPException(status_code=400, detail="Se requiere texto o un archivo.")
@@ -115,18 +116,25 @@ async def generate_slides(
         if not content_text or len(content_text.strip()) < 50:
              raise HTTPException(status_code=400, detail="El contenido es demasiado corto para generar una presentación.")
 
-        # Generar PPTX pasando imágenes
-        pptx_bytes = agent.generate_presentation(content_text, num_slides, image_paths)
+        # Generar PPTX o PDF pasando imágenes
+        output_bytes = agent.generate_presentation(content_text, num_slides, image_paths, style=style)
 
         # Programar limpieza
         if image_paths:
             background_tasks.add_task(cleanup_images, image_paths)
 
+        if style == "one_pager":
+            filename = "executive_one_pager.pdf"
+            media_type = "application/pdf"
+        else:
+            filename = "generated_presentation.pptx"
+            media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
         # Retornar como archivo descargable
         return StreamingResponse(
-            io.BytesIO(pptx_bytes),
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            headers={"Content-Disposition": "attachment; filename=generated_presentation.pptx"}
+            io.BytesIO(output_bytes),
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
 
     except Exception as e:

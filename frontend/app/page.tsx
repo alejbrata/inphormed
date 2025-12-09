@@ -67,16 +67,12 @@ export default function Home() {
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-6 py-8">
-        {currentPage === 'validator' && (
-          <div className="animate-fade-in">
-            <ClaimsValidator onValidationComplete={setValidationResults} />
-          </div>
-        )}
-        {currentPage === 'generator' && (
-          <div className="animate-fade-in">
-            <MaterialGenerator />
-          </div>
-        )}
+        <div className={currentPage === 'validator' ? 'animate-fade-in' : 'hidden'}>
+          <ClaimsValidator onValidationComplete={setValidationResults} />
+        </div>
+        <div className={currentPage === 'generator' ? 'animate-fade-in' : 'hidden'}>
+          <MaterialGenerator />
+        </div>
       </main>
 
       {/* Floating Chat Copilot */}

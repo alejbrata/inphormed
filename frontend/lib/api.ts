@@ -181,11 +181,12 @@ export const generateSummary = async (file: File): Promise<SummaryResponse> => {
     return response.data;
 };
 
-export const generateSlides = async (text: string | null, file: File | null, numSlides: number = 5): Promise<Blob> => {
+export const generateSlides = async (text: string | null, file: File | null, numSlides: number = 5, style: string = 'default'): Promise<Blob> => {
     const formData = new FormData();
     if (text) formData.append('text', text);
     if (file) formData.append('file', file);
     formData.append('num_slides', numSlides.toString());
+    formData.append('style', style);
 
     const response = await apiClient.post(
         '/api/generate/slides',

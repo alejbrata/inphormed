@@ -11,6 +11,7 @@ export default function MaterialGenerator() {
     const [file, setFile] = useState<File | null>(null);
     const [textInput, setTextInput] = useState(''); // For slides
     const [numSlides, setNumSlides] = useState(5); // Default 5 slides
+    const [isOnePager, setIsOnePager] = useState(false); // New One-Pager State
     const [loading, setLoading] = useState(false);
 
     // Results
@@ -94,47 +95,37 @@ export default function MaterialGenerator() {
         setLoading(true);
         setActiveMode(mode);
         setError(null);
+        resetResults();
 
         try {
             if (mode === 'podcast' && file) {
                 const data = await generatePodcast(file);
                 setPodcastResult(data);
-                setSummaryResult(null);
-                setSlidesResult(false);
             } else if (mode === 'summary' && file) {
                 const data = await generateSummary(file);
                 setSummaryResult(data);
-                setPodcastResult(null);
-                setSlidesResult(false);
             } else if (mode === 'slides') {
-                const blob = await generateSlides(textInput, file, numSlides);
+                const style = isOnePager ? 'one_pager' : 'default';
+                const slidesCount = isOnePager ? 1 : numSlides;
+                const blob = await generateSlides(textInput, file, slidesCount, style);
+
                 // Trigger download
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'generated_presentation.pptx';
+                a.download = isOnePager ? 'executive_one_pager.pdf' : 'generated_presentation.pptx';
                 document.body.appendChild(a);
                 a.click();
                 window.URL.revokeObjectURL(url);
                 document.body.removeChild(a);
 
                 setSlidesResult(true);
-                setPodcastResult(null);
-                setSummaryResult(null);
-                setBattleCardResult(null);
             } else if (mode === 'battle-card' && file) {
                 const data = await generateBattleCard(file);
                 setBattleCardResult(data);
-                setPodcastResult(null);
-                setSummaryResult(null);
-                setSlidesResult(false);
             } else if (mode === 'medinfo' && file) {
                 const data = await generateMedInfo(file);
                 setMedInfoResult(data);
-                setPodcastResult(null);
-                setSummaryResult(null);
-                setSlidesResult(false);
-                setBattleCardResult(null);
             }
         } catch (err: any) {
             console.error(err);
@@ -245,6 +236,42 @@ export default function MaterialGenerator() {
                             </div>
                         </div>
                     </div>
+
+                    {/* Configuration Area (Slides Only) */}
+                    {activeMode === 'slides' && (
+                        <div className="flex flex-col items-center gap-4 animate-fade-in">
+                            <div className="flex items-center gap-4 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                                <label className="flex items-center gap-3 cursor-pointer">
+                                    <div className="relative">
+                                        <input
+                                            type="checkbox"
+                                            className="sr-only peer"
+                                            checked={isOnePager}
+                                            onChange={(e) => setIsOnePager(e.target.checked)}
+                                        />
+                                        <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                    </div>
+                                    <span className="text-sm font-medium text-slate-700">
+                                        Generar como <span className="font-bold text-blue-600">Executive One-Pager</span> (Resumen Visual)
+                                    </span>
+                                </label>
+                            </div>
+
+                            {!isOnePager && (
+                                <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-xl border border-slate-200">
+                                    <span className="text-sm text-slate-500 font-medium">Diapositivas:</span>
+                                    <input
+                                        type="number"
+                                        min="3"
+                                        max="20"
+                                        value={numSlides}
+                                        onChange={(e) => setNumSlides(parseInt(e.target.value))}
+                                        className="w-16 p-1 text-center border rounded-lg font-bold text-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Generate Button */}
                     <div className="flex justify-center">
@@ -568,7 +595,7 @@ export default function MaterialGenerator() {
                             <CheckCircle2 className="w-12 h-12" />
                         </div>
                         <h3 className="text-2xl font-bold text-slate-800 mb-2">¡Presentación Lista!</h3>
-                        <p className="text-slate-600 mb-8">Tu archivo PowerPoint se ha descargado automáticamente.</p>
+                        <p className="text-slate-600 mb-8">Tu archivo {isOnePager ? 'PDF' : 'PowerPoint'} se ha descargado automáticamente.</p>
 
                         <button
                             onClick={() => handleGenerate('slides')}
