@@ -1,0 +1,38 @@
+services:
+  # --- EL CEREBRO (API + Crawler) ---
+  inphormed-api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/code
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      # ... añade aquí el resto de tus claves si las tienes en .env ...
+    depends_on:
+      - qdrant
+
+  # --- LA CARA (Frontend Next.js) ---
+  inphormed-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    working_dir: /code/frontend
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/code/frontend
+      - /code/frontend/node_modules
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://inphormed-api:8000
+    depends_on:
+      - inphormed-api
+
+  # --- LA MEMORIA (Base de Datos) ---
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"

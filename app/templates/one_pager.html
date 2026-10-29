@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 0;
+            @top-center { content: none; }
+            @bottom-center { content: none; }
+        }
+        
+        @font-face {
+            font-family: 'Roboto';
+            src: local('Roboto'), local('Arial');
+        }
+
+        :root {
+            --primary: #003366; /* Navy */
+            --secondary: #0072CE; /* Medical Blue */
+            --accent: #EBF5FF;
+            --text-dark: #1F2937;
+            --text-light: #6B7280;
+        }
+
+        body {
+            font-family: 'Roboto', 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            color: var(--text-dark);
+            background: #fff;
+            line-height: 1.5;
+        }
+
+        /* HEADER SECTION */
+        .header {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            color: white;
+            padding: 40px 50px;
+            position: relative;
+            overflow: hidden;
+            height: 180px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .header::after {
+            content: '';
+            position: absolute;
+            top: -50px;
+            right: -50px;
+            width: 200px;
+            height: 200px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 50%;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin: 0 0 10px 0;
+            font-weight: 700;
+            line-height: 1.2;
+            max-width: 80%;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .header .subtitle {
+            font-size: 16px;
+            opacity: 0.9;
+            font-style: italic;
+            max-width: 70%;
+        }
+
+        /* METRICS BAR */
+        .metrics-container {
+            display: flex;
+            justify-content: space-between;
+            background: white;
+            padding: 20px 50px;
+            margin-top: -30px;
+            position: relative;
+            z-index: 10;
+        }
+
+        .metric-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            padding: 15px 25px;
+            text-align: center;
+            flex: 1;
+            margin: 0 10px;
+            border-top: 4px solid var(--secondary);
+        }
+
+        .metric-card:first-child { margin-left: 0; }
+        .metric-card:last-child { margin-right: 0; }
+
+        .metric-value {
+            font-size: 28px;
+            font-weight: 800;
+            color: var(--primary);
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .metric-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-light);
+            font-weight: 600;
+        }
+
+        /* MAIN TWO COLUMN LAYOUT */
+        .container {
+            padding: 30px 50px;
+            display: flex;
+            gap: 40px;
+        }
+
+        .left-col {
+            flex: 1.2; /* 60% approx with gap */
+        }
+
+        .right-col {
+            flex: 0.8; /* 40% approx */
+        }
+
+        /* SECTIONS */
+        .section-title {
+            font-size: 14px;
+            font-weight: 800;
+            color: var(--secondary);
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid var(--accent);
+            padding-bottom: 5px;
+        }
+
+        .takeaway-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .takeaway-item {
+            margin-bottom: 15px;
+            padding-left: 15px;
+            border-left: 3px solid var(--primary);
+            font-size: 13px;
+            text-align: justify;
+        }
+        
+        .conclusion-box {
+            background: var(--accent);
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid var(--primary);
+            margin-top: 30px;
+        }
+
+        .conclusion-box p {
+            margin: 0;
+            font-size: 13px;
+            font-style: italic;
+            color: var(--text-dark);
+        }
+        
+        .footer {
+            position: fixed;
+            bottom: 30px;
+            right: 50px;
+            font-size: 10px;
+            color: #999;
+        }
+
+        /* UTILS */
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            color: #555;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{{ title }}</h1>
+        <div class="subtitle">{{ main_insight }}</div>
+    </div>
+
+    <div class="metrics-container">
+        {% for stat in key_stats[:3] %}
+        <div class="metric-card">
+            <span class="metric-value">{{ stat.value }}</span>
+            <span class="metric-label">{{ stat.label }}</span>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="container">
+        <div class="left-col">
+            <div class="section-title">Resultados Clave</div>
+            <ul class="takeaway-list">
+                {% for point in takeaways %}
+                <li class="takeaway-item">{{ point }}</li>
+                {% endfor %}
+            </ul>
+
+            <div class="conclusion-box">
+                <div class="section-title" style="border:none; margin-bottom: 5px; color: var(--primary);">Conclusión</div>
+                <p>{{ conclusion }}</p>
+            </div>
+        </div>
+        
+        <div class="right-col">
+           <!-- Placeholder for potentially more details or methodology if we had it -->
+           <div class="section-title">Detalles del Estudio</div>
+           <p style="font-size: 12px; color: #666; margin-bottom: 20px;">
+               Este documento es una síntesis generada por IA basada en la evidencia proporcionada.
+               Revisa los puntos clave a la izquierda para una comprensión rápida de impacto.
+           </p>
+           
+           {% if key_stats|length > 3 %}
+           <div class="section-title">Datos Adicionales</div>
+            <ul class="takeaway-list" style="border-left: none; padding-left: 0;">
+                {% for stat in key_stats[3:] %}
+                <li style="margin-bottom: 10px; font-size: 12px; border-bottom: 1px dashed #eee; padding-bottom: 5px;">
+                    <strong style="color:var(--secondary)">{{ stat.value }}</strong> {{ stat.label }}
+                </li>
+                {% endfor %}
+            </ul>
+           {% endif %}
+        </div>
+    </div>
+
+    <div class="footer">
+        Generado por Inphormed AI • {{ "now"|format_date }}
+    </div>
+</body>
+</html>

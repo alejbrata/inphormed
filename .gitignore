@@ -1,0 +1,66 @@
+# Entorno virtual y secretos
+venv/
+.venv/
+.env
+
+# Archivos Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Logs y temporales
+logs/*
+!logs/.gitkeep
+*.log
+*.tmp
+*.bak
+debug_output.txt
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# IDEs y entornos locales
+.vscode/
+.idea/
+
+# Datos grandes o modelos
+*.ckpt
+*.pt
+*.bin
+*.h5
+*.pkl
+*.npy
+
+# Docker y compilación
+*.pid
+*.tar
+*.egg-info/
+build/
+dist/
+
+# Archivos de prueba
+coverage/
+.cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+test_output.pdf
+tests/test_one_pager.pptx
+
+# Datasets sintéticos (no versionar)
+synthetic/
+
+# Artefactos generados por la app
+outputs/
+uploads/
+var/
+onepager.pdf
+
+# Plantilla de presentaciones (de terceros, no se distribuye)
+Innovacion-en-Salud-Un-Enfoque-Farmaceutico.pptx
+
+# ZIPs
+*.zip
