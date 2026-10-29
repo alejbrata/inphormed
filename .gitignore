@@ -64,3 +64,12 @@ Innovacion-en-Salud-Un-Enfoque-Farmaceutico.pptx
 
 # ZIPs
 *.zip
+
+# Scripts de prueba locales (no se publican)
+test_api_response.py
+test_compliance_manual.py
+test_crawl.py
+test_env.py
+verify_pdf.py
+analyze_template.py
+analysis_report.txt
